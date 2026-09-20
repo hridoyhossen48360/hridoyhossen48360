@@ -777,8 +777,7 @@ async function sendListPage(api, threadID, senderID, category, page, limit, pref
     let msg = `${label} — Page ${page}/${totalPages} (${total} total)\n\n`;
     items.forEach(cmd => { msg += renderCmdRow(cmd); });
     if (totalPages > 1)
-      msg += `Reply "page <number>" or react ➡ to go to next page.\n` +
-
+      msg += `Reply "page <number>" or react ➡ to go to next page.\n`;
 
     const sent = await api.sendMessage(msg.trim(), threadID);
     if (totalPages > 1) {
@@ -805,7 +804,6 @@ async function sendSearchPage(api, threadID, senderID, query, category, page, li
     items.forEach(cmd => { msg += renderCmdRow(cmd); });
     if (totalPages > 1)
       msg += `Page ${page}/${totalPages}\nReply "page <number>" or react ➡ next page.\n`;
-
 
     const sent = await api.sendMessage(msg.trim(), threadID);
     const h = {
