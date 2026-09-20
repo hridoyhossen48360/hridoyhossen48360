@@ -1,3 +1,4 @@
+"use strict";
 /**
  * ╔══════════════════════════════════════════════════════════════╗
  * ║            GoatStore — GoatBot Store Command                 ║
@@ -20,7 +21,6 @@
  *  ✅ GoatBot compatibility
  */
 
-"use strict";
 
 const fs   = require("fs");
 const path = require("path");
