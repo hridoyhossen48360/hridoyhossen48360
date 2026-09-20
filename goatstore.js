@@ -713,7 +713,7 @@ module.exports = {
   config: {
     name:             "goatstore",
     aliases:          ["gs", "store", "cmdstore"],
-    version:          "1.0.0",
+    version:          "1.0.1",
     author:           "Hridoy Hossen",
     countDown:        3,
     role:             0,
