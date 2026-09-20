@@ -1,82 +1,34 @@
 "use strict";
-/**
- * ╔══════════════════════════════════════════════════════════════╗
- * ║            GoatStore — GoatBot Store Command                 ║
- * ║     Your own store: https://goatstore-nu.vercel.app          ║
- * ║  Author : Hridoy Hossen  |  Compatible: GoatBot v6+          ║
- * ╚══════════════════════════════════════════════════════════════╝
- *
- * FEATURES:
- *  ✅ Search | List | Category | Author Search | Command Details
- *  ✅ Install | Event Install | Upload (command/event)
- *  ✅ Like / Unlike | Trending
- *  ✅ Delete commands
- *  ✅ Pagination (Reply-based & Reaction-based)
- *  ✅ Auto-update (self) | Auto-sync (background)
- *  ✅ Syntax validation | Framework detection
- *  ✅ Command/Event folder detection | Cache system
- *  ✅ Progress/loading UI
- *  ✅ Error handling | Duplicate detection
- *  ✅ Install count | Restart-less command reload
- *  ✅ GoatBot compatibility
- */
+//GoatStore — GoatBot Store Command                 ║
+//Your own store: https://goatstore-nu.vercel.app          ║
+//Author : Hridoy Hossen  |  Compatible: GoatBot v6+      
 
 
 const fs   = require("fs");
 const path = require("path");
 const axios = require("axios");
 
-// ═══════════════════════════════════════════════════════════
-//  CONFIG — change these to match your setup
-// ═══════════════════════════════════════════════════════════
 const _H = "https://hridoy-api.onrender.com";
 function _api(path = "") { return `${_H}/api/gs${path}`; }
 
 const CONFIG = {
   API_HOST: "https://hridoy-api.onrender.com",
-
-  // How often to check for self-updates (ms) — 30 minutes
   UPDATE_CHECK_INTERVAL: 1000 * 60 * 30,
-
-  // Pastebin API key — used to auto-upload code and get a raw link
   PASTEBIN_API_KEY: "gox0XMEkCRsKqzS5Jh9ffKD4mv7vya-3",
 
-  // Auto-sync your commands to the store on startup?
   AUTO_SYNC: true,
-
-  // How often the background auto-sync sweep re-checks every file (ms).
-  // A file-watcher (below) already catches new/changed files almost
-  // instantly — this interval is just a safety-net re-scan.
-  AUTO_SYNC_INTERVAL: 1000 * 60 * 60, // 1 hour
-
-  // Watch the commands/events folders and sync a file within a couple
-  // of seconds of it being added or changed, instead of waiting for
-  // the interval above.
+  AUTO_SYNC_INTERVAL: 1000 * 60 * 60,
   AUTO_SYNC_WATCH: true,
-
-  // Categories your API supports (must match backend enum)
   CATEGORIES: ["economy", "fun", "moderation", "games", "utility", "ai"],
-
-  // Max reaction-edits before sending a fresh message
   MAX_EDITS_PER_MESSAGE: 5,
 };
 
-// ═══════════════════════════════════════════════════════════
-//  CACHE FILE PATHS
-// ═══════════════════════════════════════════════════════════
 const SYNC_CACHE_PATH = path.join(process.cwd(), "goatstore_sync_cache.json");
 const DIR_CACHE_PATH  = path.join(process.cwd(), "goatstore_dircache.json");
-
-// ═══════════════════════════════════════════════════════════
-//  IN-MEMORY STATE
-// ═══════════════════════════════════════════════════════════
 const userSeenNoti      = new Map();
 let   _updateCheckCache = null;
 let   _autoupdateInFlight = false;
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — Prefix detection
-// ═══════════════════════════════════════════════════════════
 function getPrefix(threadData) {
   try {
     if (threadData?.data?.prefix) return threadData.data.prefix;
@@ -85,9 +37,6 @@ function getPrefix(threadData) {
   return "!";
 }
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — Cache I/O
-// ═══════════════════════════════════════════════════════════
 function loadJson(filePath, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
   catch { return fallback; }
@@ -98,9 +47,6 @@ function saveJson(filePath, data) {
   catch (_) {}
 }
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — Directory detection
-// ═══════════════════════════════════════════════════════════
 const EVENTS_PATTERNS = ["events", "event"];
 const SKIP_DIRS       = new Set(["node_modules", ".git", ".cache", "dist", "build"]);
 
@@ -126,7 +72,7 @@ function scanForDir(startDir, patterns, maxDepth = 2) {
 function getCmdsDir(forceRescan = false) {
   if (!forceRescan && _dirCache.cmdsDir && fs.existsSync(_dirCache.cmdsDir))
     return _dirCache.cmdsDir;
-  const dir = __dirname; // goatstore.js lives IN the commands folder
+  const dir = __dirname; 
   _dirCache.cmdsDir = dir;
   saveJson(DIR_CACHE_PATH, _dirCache);
   return dir;
@@ -142,9 +88,6 @@ function getEventsDir(forceRescan = false) {
   return dir;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — Version comparison
-// ═══════════════════════════════════════════════════════════
 function parseVer(v) { return String(v).split(".").map(n => parseInt(n) || 0); }
 function cmpVer(a, b) {
   const pa = parseVer(a), pb = parseVer(b);
@@ -155,18 +98,12 @@ function cmpVer(a, b) {
   return 0;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — Hash (for sync dedup)
-// ═══════════════════════════════════════════════════════════
 function hashContent(content) {
   let h = 0;
   for (let i = 0; i < content.length; i++) h = (h * 31 + content.charCodeAt(i)) | 0;
   return h.toString(16);
 }
 
-// ═══════════════════════════════════════════════════════════
-//  HELPERS — GoatBot framework detection
-// ═══════════════════════════════════════════════════════════
 function detectFramework(code) {
   const isGoat =
     /module\.exports\s*=\s*\{/.test(code) &&
@@ -175,19 +112,11 @@ function detectFramework(code) {
   return isGoat ? "goat" : "other";
 }
 
-// Shows the short #01-style ID when the API gave us one, falling back
-// to the raw database ID for older records that predate it. Either form
-// works when typed back into {pn} install/delete/rawlink <id>.
 function displayId(cmd) {
   if (cmd && Number.isInteger(cmd.seq)) return "#" + String(cmd.seq).padStart(2, "0");
   return cmd?._id || cmd?.id || "N/A";
 }
 
-// ═══════════════════════════════════════════════════════════
-//  API CALLS
-// ═══════════════════════════════════════════════════════════
-
-/** Search commands */
 async function apiSearch(q = "", category = "", limit = 0, kind = "") {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
@@ -198,20 +127,18 @@ async function apiSearch(q = "", category = "", limit = 0, kind = "") {
   return Array.isArray(res.data) ? res.data : [];
 }
 
-/** Trending commands */
 async function apiTrending(limit = 10) {
   const res = await axios.get(`${_api("/commands/trending")}?limit=${limit}`);
   const data = Array.isArray(res.data) ? res.data : [];
   return data.slice(0, limit);
 }
 
-/** Fetch single command by ID */
+
 async function apiGetOne(id) {
   const res = await axios.get(_api(`/commands/${id}`));
   return res.data || null;
 }
 
-/** Upload a new command/event */
 async function apiUpload({ name, category, description, author, code, kind, version }) {
   const res = await axios.post(
     _api("/commands"),
@@ -221,17 +148,15 @@ async function apiUpload({ name, category, description, author, code, kind, vers
   return { ...res.data, _created: res.status === 201 };
 }
 
-/** Toggle like on a command */
 async function apiLike(id, visitorId) {
   const res = await axios.post(
     _api(`/commands/${id}/like`),
     { visitor_id: visitorId },
     { headers: { "Content-Type": "application/json" } }
   );
-  return res.data; // { liked, likes }
+  return res.data; 
 }
 
-/** Delete a command */
 async function apiDelete(id) {
   const res = await axios.delete(
     _api(`/commands/${id}`),
@@ -240,15 +165,6 @@ async function apiDelete(id) {
   return res.data;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PASTEBIN — upload code and return raw URL
-// ═══════════════════════════════════════════════════════════
-
-/**
- * Upload code to Pastebin and return the raw URL.
- * Uses Pastebin API v2 (POST https://pastebin.com/api/api_post.php).
- * Returns: "https://pastebin.com/raw/XXXXXXXX"  or null on failure.
- */
 async function uploadToPastebin(code, pasteName = "GoatBot Command") {
   try {
     const params = new URLSearchParams();
@@ -257,8 +173,8 @@ async function uploadToPastebin(code, pasteName = "GoatBot Command") {
     params.set("api_paste_code",    code);
     params.set("api_paste_name",    pasteName);
     params.set("api_paste_format",  "javascript");
-    params.set("api_paste_expire_date", "N"); // Never expire
-    params.set("api_paste_private", "0");     // Public
+    params.set("api_paste_expire_date", "N"); 
+    params.set("api_paste_private", "0");    
 
     const res = await axios.post(
       "https://pastebin.com/api/api_post.php",
@@ -266,11 +182,9 @@ async function uploadToPastebin(code, pasteName = "GoatBot Command") {
       { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 10000 }
     );
 
-    // Response is plain text like "https://pastebin.com/AbCdEfGh"
     const pasteUrl = (res.data || "").trim();
     if (!pasteUrl.startsWith("https://pastebin.com/")) return null;
 
-    // Convert to raw URL: https://pastebin.com/raw/AbCdEfGh
     const pasteKey = pasteUrl.replace("https://pastebin.com/", "");
     return `https://pastebin.com/raw/${pasteKey}`;
   } catch (_) {
@@ -278,7 +192,6 @@ async function uploadToPastebin(code, pasteName = "GoatBot Command") {
   }
 }
 
-/** Save Pastebin raw link to DB record */
 async function apiSetPastebin(id, rawUrl) {
   try {
     await axios.patch(
@@ -289,9 +202,6 @@ async function apiSetPastebin(id, rawUrl) {
   } catch (_) {}
 }
 
-// ═══════════════════════════════════════════════════════════
-//  VISITOR ID — stable anonymous ID per bot instance
-// ═══════════════════════════════════════════════════════════
 let _visitorId = null;
 function getVisitorId() {
   if (_visitorId) return _visitorId;
@@ -303,9 +213,6 @@ function getVisitorId() {
   return _visitorId;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PROGRESS ANIMATION
-// ═══════════════════════════════════════════════════════════
 const FRAMES   = ["◖", "◕", "◔", "◓", "◒", "◑", "◐"];
 const buildBar = (pct) =>
   "█".repeat(Math.floor(pct / 10)) + "░".repeat(10 - Math.floor(pct / 10));
@@ -351,9 +258,6 @@ async function animateUpload(api, threadID, name) {
   return info.messageID;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  AUTOLOAD — reload a command into GoatBot without restart
-// ═══════════════════════════════════════════════════════════
 function autoloadCommand(filePath) {
   try {
     delete require.cache[require.resolve(filePath)];
@@ -372,9 +276,6 @@ function autoloadCommand(filePath) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  CATEGORY BADGE
-// ═══════════════════════════════════════════════════════════
 const CAT_ICONS = {
   economy: "💰", fun: "🎉", moderation: "🛡️",
   games: "🎮", utility: "🔧", ai: "✨",
@@ -384,25 +285,16 @@ function catBadge(cmd) {
   return `${icon} ${cmd.category || "uncategorized"}`;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  INSTALL — download code and save to disk
-// ═══════════════════════════════════════════════════════════
 async function doInstall(api, threadID, id, forceKind = null) {
-  // Fetch the command by ID
   let cmd = null;
   try {
     cmd = await apiGetOne(id);
   } catch (_) {}
-
-  // B2 fix: proper null check — cmd itself may be null
   if (!cmd) return api.sendMessage("❌ Command not found.", threadID);
   if (!cmd.code && !cmd.pastebin_url)
     return api.sendMessage("❌ Command has no code or Pastebin link stored.", threadID);
-
-  // Determine install type
   const isEvent = forceKind === "event";
 
-  // B3 fix: if code is missing but pastebin_url exists, fetch it
   let code = cmd.code || "";
   if (!code && cmd.pastebin_url) {
     try {
@@ -418,7 +310,6 @@ async function doInstall(api, threadID, id, forceKind = null) {
     }
   }
 
-  // Validate syntax
   if (code) {
     try { new Function(code); }
     catch (err) { return api.sendMessage(`❌ Syntax error in remote code:\n${err.message}`, threadID); }
@@ -441,7 +332,6 @@ async function doInstall(api, threadID, id, forceKind = null) {
     return api.sendMessage(`❌ Failed to write file:\n${err.message}`, threadID);
   }
 
-  // Reload into GoatBot (commands only; events need restart)
   const load = isEvent ? { success: false } : autoloadCommand(filePath);
 
   const msg =
@@ -473,25 +363,17 @@ async function doInstall(api, threadID, id, forceKind = null) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  UPLOAD — send a local file to the store
-// ═══════════════════════════════════════════════════════════
 async function doUpload(api, threadID, filePath, kind = "command") {
   let code;
   try { code = fs.readFileSync(filePath, "utf8"); }
   catch (err) { return api.sendMessage(`❌ Read failed:\n${err.message}`, threadID); }
-
-  // Syntax check
   try { new Function(code); }
   catch (err) { return api.sendMessage(`❌ Syntax Error:\n${err.message}`, threadID); }
-
-  // Parse meta from code
   const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(filePath, ".js");
   const author      = code.match(/author\s*:\s*["'`](.*?)["'`]/)?.[1] || "Unknown";
   const description = code.match(/longDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
                    || code.match(/shortDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
                    || "No description";
-  // Map GoatBot category to store category
   const rawCat  = (code.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "utility").toLowerCase();
   const category = CONFIG.CATEGORIES.includes(rawCat) ? rawCat : "utility";
   const version = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
@@ -500,9 +382,6 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   try { pid = await animateUpload(api, threadID, name); } catch (_) {}
 
   try {
-    // ── Upload code to Pastebin FIRST to avoid 413 payload-too-large ──
-    // The store API only receives metadata + the raw Pastebin URL,
-    // never the full source code, so the request body stays tiny.
     let rawUrl = null;
     rawUrl = await uploadToPastebin(code, name);
     if (!rawUrl) {
@@ -523,17 +402,9 @@ async function doUpload(api, threadID, filePath, kind = "command") {
       );
     }
 
-    // Every genuinely new upload gets saved as its own entry with its own
-    // ID — the API only ever short-circuits when name + full script (code)
-    // + version + author are ALL identical to something already stored
-    // (result "_duplicate": true below), to avoid pointless identical
-    // clones. Any real change — different code, a version bump, a
-    // different author — always becomes a fresh entry and never touches
-    // the older one.
     const isDuplicate = result._duplicate === true;
     const newId = result._id || result.id;
 
-    // Save pastebin link to DB record if not already stored
     if (rawUrl && newId && !result.pastebin_url) {
       apiSetPastebin(newId, rawUrl).catch(() => {});
     }
@@ -585,9 +456,6 @@ function getPfxHint() {
   try { return getPrefix(); } catch (_) { return "!"; }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SELF-UPDATE CHECK
-// ═══════════════════════════════════════════════════════════
 async function checkSelfUpdate() {
   const now = Date.now();
   if (_updateCheckCache && (now - _updateCheckCache.checkedAt) < CONFIG.UPDATE_CHECK_INTERVAL)
@@ -640,9 +508,6 @@ async function maybeAutoUpdate(api, threadID) {
   finally { _autoupdateInFlight = false; }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  AUTO-SYNC — upload local commands to store in background
-// ═══════════════════════════════════════════════════════════
 async function runAutoSync() {
   const folders = [
     { dir: getCmdsDir(),    kind: "command" },
@@ -660,13 +525,10 @@ async function runAutoSync() {
       try { code = fs.readFileSync(fullPath, "utf8"); } catch (_) { continue; }
 
       const hash     = hashContent(code);
-      // B10 fix: include version in cache key so a version bump always re-uploads
       const cacheKey = `${kind}:${file}:${version}`;
       if (cache[cacheKey]?.hash === hash) continue;
 
-      // Syntax check
       try { new Function(code); } catch (_) { continue; }
-      // Only sync GoatBot files
       if (detectFramework(code) !== "goat") continue;
 
       const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(file, ".js");
@@ -677,7 +539,6 @@ async function runAutoSync() {
       const version     = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
 
       try {
-        // Upload to Pastebin first to avoid 413 on large files
         const rawUrl = await uploadToPastebin(code, name);
         const uploadCode = rawUrl || code;
         const result = await apiUpload({ name, category, description, author, code: uploadCode, kind, version });
@@ -701,10 +562,6 @@ async function runAutoSync() {
   }
   saveJson(SYNC_CACHE_PATH, cache);
 }
-
-// ═══════════════════════════════════════════════════════════
-//  INSTANT SYNC — watch commands/events folders, upload on change
-// ═══════════════════════════════════════════════════════════
 let _watchDebounce = null;
 let _watchersStarted = false;
 
@@ -718,34 +575,21 @@ function startAutoSyncWatcher() {
     try {
       fs.watch(dir, { persistent: false }, (eventType, filename) => {
         if (!filename || !filename.endsWith(".js")) return;
-        // Debounce — editors often fire several change events per save,
-        // and a fresh bot restart can touch many files at once.
         clearTimeout(_watchDebounce);
         _watchDebounce = setTimeout(() => {
           runAutoSync().catch(() => {});
         }, 3000);
       });
     } catch (_) {
-      // fs.watch isn't available on every OS/filesystem — the interval
-      // sweep in onLoad still covers this dir, just less instantly.
-    }
-  }
-}
 
-// ═══════════════════════════════════════════════════════════
-//  TODAY'S UPDATES
-// ═══════════════════════════════════════════════════════════
 async function getTodayUpdates() {
   try {
-    const all   = await apiSearch(""); // all commands, sorted newest first
+    const all   = await apiSearch("");
     const today = new Date().toDateString();
     return all.filter(c => new Date(c.createdAt || c.updatedAt || 0).toDateString() === today);
   } catch (_) { return []; }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PAGINATION HELPERS
-// ═══════════════════════════════════════════════════════════
 function paginateArray(arr, page, limit) {
   const total      = arr.length;
   const totalPages = Math.max(1, Math.ceil(total / limit));
@@ -766,7 +610,6 @@ function renderCmdRow(cmd) {
   );
 }
 
-// ─── List page ────────────────────────────────────────────
 async function sendListPage(api, threadID, senderID, category, page, limit, prefix) {
   try {
     const all  = await apiSearch("", category);
@@ -791,7 +634,6 @@ async function sendListPage(api, threadID, senderID, category, page, limit, pref
   } catch (_) { api.sendMessage("❌ List API error.", threadID); }
 }
 
-// ─── Search page ──────────────────────────────────────────
 async function sendSearchPage(api, threadID, senderID, query, category, page, limit, prefix) {
   try {
     const all  = await apiSearch(query, category);
@@ -815,7 +657,6 @@ async function sendSearchPage(api, threadID, senderID, query, category, page, li
   } catch (_) { api.sendMessage("❌ Search API error.", threadID); }
 }
 
-// ─── Render-into (for reaction pagination) ───────────────
 async function renderListInto(category, page, limit) {
   const all  = await apiSearch("", category);
   const { items, total, totalPages } = paginateArray(all, page, limit);
@@ -838,9 +679,7 @@ async function renderSearchInto(query, category, page, limit) {
   return { text: msg.trim(), totalPages };
 }
 
-// ═══════════════════════════════════════════════════════════
-//  MENU
-// ═══════════════════════════════════════════════════════════
+
 function buildMenu(prefix) {
   const p = `${prefix}gs`;
   return (
@@ -870,9 +709,6 @@ function buildMenu(prefix) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-//  MODULE EXPORT
-// ═══════════════════════════════════════════════════════════
 module.exports = {
   config: {
     name:             "goatstore",
@@ -905,37 +741,26 @@ module.exports = {
     autoSync: CONFIG.AUTO_SYNC,
   },
 
-  // ─── onLoad ─────────────────────────────────────────────
   onLoad: function () {
-    // Background self-update check
     setTimeout(() => {
       maybeAutoUpdate(null, null).catch(() => {});
       setInterval(() => maybeAutoUpdate(null, null).catch(() => {}), CONFIG.UPDATE_CHECK_INTERVAL);
     }, 6000);
-
-    // Auto-sync if enabled — runs once shortly after startup, then on
-    // a fixed interval as a safety-net re-scan.
     if (module.exports.config.autoSync) {
       setTimeout(() => {
         runAutoSync().catch(() => {});
         setInterval(() => runAutoSync().catch(() => {}), CONFIG.AUTO_SYNC_INTERVAL);
       }, 10000);
-
-      // Instant sync — watches the commands/events folders and uploads
-      // a file within a couple of seconds of it being added or edited,
-      // instead of waiting for the interval sweep above.
       if (CONFIG.AUTO_SYNC_WATCH) startAutoSyncWatcher();
     }
   },
 
-  // ─── onReply ────────────────────────────────────────────
   onReply: async function ({ api, event, Reply }) {
     const { threadID, body, senderID } = event;
-    // Reply-based delete
     const delMatch = body.match(/^delete\s+(\S+)/i);
     if (delMatch) {
       const rawId = delMatch[1];
-      const id = rawId.replace(/^#/, ""); // strip # prefix
+      const id = rawId.replace(/^#/, ""); 
       try {
         await apiDelete(id);
         return api.sendMessage(`🗑️ Deleted! ID: ${rawId}`, threadID);
@@ -962,7 +787,6 @@ module.exports = {
       await sendSearchPage(api, threadID, senderID, query, category, newPage, limit, prefix);
   },
 
-  // ─── onReaction ─────────────────────────────────────────
   onReaction: async function ({ api, event, Reaction }) {
     const { threadID, userID } = event;
     const { mode, query, category, page, totalPages, limit, senderID, messageID, editCount = 0 } = Reaction;
@@ -999,17 +823,13 @@ module.exports = {
     }
   },
 
-  // ─── onStart ────────────────────────────────────────────
   onStart: async function ({ api, event, args, threadData }) {
     const { threadID, senderID } = event;
 
     const prefix = getPrefix(threadData || event?.threadData);
     const sub    = args[0]?.toLowerCase() || null;
-
-    // Background self-update (cached — near zero cost)
     maybeAutoUpdate(api, threadID).catch(() => {});
 
-    // ── Menu / Notification ──────────────────────────────
     if (!sub) {
       const updates = await getTodayUpdates();
       if (updates.length && !userSeenNoti.get(senderID)) {
@@ -1021,8 +841,6 @@ module.exports = {
       }
       return api.sendMessage(buildMenu(prefix), threadID);
     }
-
-    // ── Notifications ────────────────────────────────────
     if (sub === "n" || sub === "notification") {
       const updates = await getTodayUpdates();
       if (!updates.length)
@@ -1034,7 +852,6 @@ module.exports = {
       return api.sendMessage(msg.trim(), threadID);
     }
 
-    // ── Sync ─────────────────────────────────────────────
     if (sub === "sync") {
       api.sendMessage("🔄 Starting manual sync...", threadID);
       try {
@@ -1046,9 +863,7 @@ module.exports = {
       return;
     }
 
-    // ── List ─────────────────────────────────────────────
     if (sub === "list" || sub === "ls") {
-      // !gs list [page]   OR   !gs list <category> [page]
       const maybeCategory = args[1]?.toLowerCase();
       const isCategory    = CONFIG.CATEGORIES.includes(maybeCategory);
       const category      = isCategory ? maybeCategory : "";
@@ -1056,7 +871,6 @@ module.exports = {
       return sendListPage(api, threadID, senderID, category, page, 8, prefix);
     }
 
-    // ── Event install ────────────────────────────────────
     if (sub === "event") {
       const action = args[1]?.toLowerCase();
       if (action === "install") {
@@ -1064,19 +878,16 @@ module.exports = {
         if (!id) return api.sendMessage(`❌ Usage: ${prefix}gs event install <id>`, threadID);
         return doInstall(api, threadID, id, "event");
       }
-      // Event list/search
       const q = args.slice(1).join(" ");
       return sendSearchPage(api, threadID, senderID, q, "", 1, 5, prefix);
     }
 
-    // ── Install ──────────────────────────────────────────
     if (sub === "install") {
       const id = args[1];
       if (!id) return api.sendMessage(`❌ Usage: ${prefix}gs install <id>`, threadID);
       return doInstall(api, threadID, id, null);
     }
 
-    // ── Like ─────────────────────────────────────────────
     if (sub === "like") {
       const rawId = args[1];
       if (!rawId) return api.sendMessage(`❌ Usage: ${prefix}gs like <id>`, threadID);
@@ -1090,7 +901,6 @@ module.exports = {
       } catch (_) { return api.sendMessage("❌ Like API error.", threadID); }
     }
 
-    // ── Trending ─────────────────────────────────────────
     if (sub === "trend" || sub === "trending") {
       try {
         const list = await apiTrending(8);
@@ -1109,7 +919,6 @@ module.exports = {
       } catch (_) { return api.sendMessage("❌ Trending API error.", threadID); }
     }
 
-    // ── Upload ───────────────────────────────────────────
     if (sub === "upload") {
       const isEvent = args[1]?.toLowerCase() === "event";
       const fileName = isEvent ? args[2] : args[1];
@@ -1119,7 +928,6 @@ module.exports = {
           `📁 Usage:\n• ${prefix}gs upload <fileName>\n• ${prefix}gs upload event <fileName>`,
           threadID
         );
-      // Include GoatBot v2 standard paths (scripts/cmds, scripts/events)
       const cwd = process.cwd();
       const stdCmds   = path.join(cwd, "scripts", "cmds");
       const stdEvents = path.join(cwd, "scripts", "events");
@@ -1135,7 +943,6 @@ module.exports = {
       return doUpload(api, threadID, filePath, kind);
     }
 
-    // ── Raw Link ─────────────────────────────────────────
     if (sub === "rawlink" || sub === "raw") {
       const id = args[1];
       if (!id) return api.sendMessage(`❌ Usage: ${prefix}gs rawlink <id>`, threadID);
@@ -1149,7 +956,6 @@ module.exports = {
           return api.sendMessage("❌ Command not found.", threadID);
         }
 
-        // Already has a Pastebin link → return it directly
         if (cmd.pastebin_url) {
           api.unsendMessage(loadMsg.messageID).catch(() => {});
           return api.sendMessage(
@@ -1161,7 +967,6 @@ module.exports = {
           );
         }
 
-        // No link yet — upload to Pastebin now
         if (!cmd.code) {
           api.unsendMessage(loadMsg.messageID).catch(() => {});
           return api.sendMessage("❌ This command has no code stored.", threadID);
@@ -1179,7 +984,6 @@ module.exports = {
           );
         }
 
-        // B6 fix: use MongoDB _id, not the user-supplied id arg (which may be a seq number)
         const cmdMongoId = cmd._id || cmd.id;
         await apiSetPastebin(cmdMongoId, rawUrl);
 
@@ -1199,7 +1003,6 @@ module.exports = {
       }
     }
 
-    // ── Delete (admin) ───────────────────────────────────
     if (sub === "delete") {
       const rawId = args[1];
       if (!rawId) return api.sendMessage(`❌ Usage: ${prefix}gs delete <id>`, threadID);
@@ -1213,14 +1016,12 @@ module.exports = {
       }
     }
 
-    // ── Author search ────────────────────────────────────
     if (sub === "author") {
       const authorName = args.slice(1).join(" ");
       if (!authorName) return api.sendMessage(`❌ Usage: ${prefix}gs author <name>`, threadID);
       return sendSearchPage(api, threadID, senderID, authorName, "", 1, 5, prefix);
     }
 
-    // ── Category browse ──────────────────────────────────
     if (sub === "cat" || sub === "category") {
       const cat = args[1]?.toLowerCase();
       if (!CONFIG.CATEGORIES.includes(cat))
@@ -1231,7 +1032,6 @@ module.exports = {
       return sendListPage(api, threadID, senderID, cat, 1, 8, prefix);
     }
 
-    // ── Browse by kind: events vs commands ────────────────
     if (sub === "events" || sub === "event") {
       const list = await apiSearch("", "", 0, "event").catch(() => []);
       if (!list.length) return api.sendMessage("❌ No events stored yet.", threadID);
@@ -1249,9 +1049,6 @@ module.exports = {
       return api.sendMessage(msg.trim(), threadID);
     }
 
-    // ── Details (Mongo ID or short #ID) ──────────────────
-    // Typing just the number/ID shows details AND the raw link in one go —
-    // generating the raw link on the spot if one isn't saved yet.
     const query = args.join(" ").trim();
     const looksLikeId = /^[a-f\d]{24}$/i.test(query) || /^#?\d+$/.test(query);
     if (looksLikeId) {
@@ -1291,7 +1088,6 @@ module.exports = {
       } catch (_) { return api.sendMessage("❌ Details fetch error.", threadID); }
     }
 
-    // ── Universal search ─────────────────────────────────
     return sendSearchPage(api, threadID, senderID, query, "", 1, 5, prefix);
   },
 };
