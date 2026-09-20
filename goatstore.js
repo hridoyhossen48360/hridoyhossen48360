@@ -1,8 +1,4 @@
 "use strict";
-//GoatStore — GoatBot Store Command                 ║
-//Your own store: https://goatstore-nu.vercel.app          ║
-//Author : Hridoy Hossen  |  Compatible: GoatBot v6+      
-
 
 const fs   = require("fs");
 const path = require("path");
@@ -13,18 +9,25 @@ function _api(path = "") { return `${_H}/api/gs${path}`; }
 
 const CONFIG = {
   API_HOST: "https://hridoy-api.onrender.com",
+
   UPDATE_CHECK_INTERVAL: 1000 * 60 * 30,
+
   PASTEBIN_API_KEY: "gox0XMEkCRsKqzS5Jh9ffKD4mv7vya-3",
 
   AUTO_SYNC: true,
+
   AUTO_SYNC_INTERVAL: 1000 * 60 * 60,
+
   AUTO_SYNC_WATCH: true,
+
   CATEGORIES: ["economy", "fun", "moderation", "games", "utility", "ai"],
+
   MAX_EDITS_PER_MESSAGE: 5,
 };
 
 const SYNC_CACHE_PATH = path.join(process.cwd(), "goatstore_sync_cache.json");
 const DIR_CACHE_PATH  = path.join(process.cwd(), "goatstore_dircache.json");
+
 const userSeenNoti      = new Map();
 let   _updateCheckCache = null;
 let   _autoupdateInFlight = false;
@@ -72,7 +75,7 @@ function scanForDir(startDir, patterns, maxDepth = 2) {
 function getCmdsDir(forceRescan = false) {
   if (!forceRescan && _dirCache.cmdsDir && fs.existsSync(_dirCache.cmdsDir))
     return _dirCache.cmdsDir;
-  const dir = __dirname; 
+  const dir = __dirname;
   _dirCache.cmdsDir = dir;
   saveJson(DIR_CACHE_PATH, _dirCache);
   return dir;
@@ -133,7 +136,6 @@ async function apiTrending(limit = 10) {
   return data.slice(0, limit);
 }
 
-
 async function apiGetOne(id) {
   const res = await axios.get(_api(`/commands/${id}`));
   return res.data || null;
@@ -154,7 +156,7 @@ async function apiLike(id, visitorId) {
     { visitor_id: visitorId },
     { headers: { "Content-Type": "application/json" } }
   );
-  return res.data; 
+  return res.data;
 }
 
 async function apiDelete(id) {
@@ -173,8 +175,8 @@ async function uploadToPastebin(code, pasteName = "GoatBot Command") {
     params.set("api_paste_code",    code);
     params.set("api_paste_name",    pasteName);
     params.set("api_paste_format",  "javascript");
-    params.set("api_paste_expire_date", "N"); 
-    params.set("api_paste_private", "0");    
+    params.set("api_paste_expire_date", "N");
+    params.set("api_paste_private", "0");
 
     const res = await axios.post(
       "https://pastebin.com/api/api_post.php",
@@ -286,13 +288,16 @@ function catBadge(cmd) {
 }
 
 async function doInstall(api, threadID, id, forceKind = null) {
+
   let cmd = null;
   try {
     cmd = await apiGetOne(id);
   } catch (_) {}
+
   if (!cmd) return api.sendMessage("❌ Command not found.", threadID);
   if (!cmd.code && !cmd.pastebin_url)
     return api.sendMessage("❌ Command has no code or Pastebin link stored.", threadID);
+
   const isEvent = forceKind === "event";
 
   let code = cmd.code || "";
@@ -367,13 +372,16 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   let code;
   try { code = fs.readFileSync(filePath, "utf8"); }
   catch (err) { return api.sendMessage(`❌ Read failed:\n${err.message}`, threadID); }
+
   try { new Function(code); }
   catch (err) { return api.sendMessage(`❌ Syntax Error:\n${err.message}`, threadID); }
+
   const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(filePath, ".js");
   const author      = code.match(/author\s*:\s*["'`](.*?)["'`]/)?.[1] || "Unknown";
   const description = code.match(/longDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
                    || code.match(/shortDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
                    || "No description";
+
   const rawCat  = (code.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "utility").toLowerCase();
   const category = CONFIG.CATEGORIES.includes(rawCat) ? rawCat : "utility";
   const version = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
@@ -382,6 +390,7 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   try { pid = await animateUpload(api, threadID, name); } catch (_) {}
 
   try {
+
     let rawUrl = null;
     rawUrl = await uploadToPastebin(code, name);
     if (!rawUrl) {
@@ -438,7 +447,7 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   } catch (err) {
     if (pid) api.unsendMessage(pid).catch(() => {});
     const errMsg = err.response?.data?.error || err.message || "Unknown error";
-    // Handle duplicate from HTTP 409
+
     if (err.response?.status === 409) {
       return api.sendMessage(
         `⚠️ Already Exists in Store!\n╭─‣ Name : ${name}\n╰────────────◊\n💡 A command with that name already exists.`,
@@ -461,7 +470,7 @@ async function checkSelfUpdate() {
   if (_updateCheckCache && (now - _updateCheckCache.checkedAt) < CONFIG.UPDATE_CHECK_INTERVAL)
     return _updateCheckCache.result;
   try {
-    // Search for "goatstore" command in store
+
     const cmds = await apiSearch("goatstore");
     const match = cmds.find(c => c.name?.toLowerCase() === "goatstore");
     if (!match) { _updateCheckCache = { checkedAt: now, result: null }; return null; }
@@ -525,10 +534,12 @@ async function runAutoSync() {
       try { code = fs.readFileSync(fullPath, "utf8"); } catch (_) { continue; }
 
       const hash     = hashContent(code);
+
       const cacheKey = `${kind}:${file}:${version}`;
       if (cache[cacheKey]?.hash === hash) continue;
 
       try { new Function(code); } catch (_) { continue; }
+
       if (detectFramework(code) !== "goat") continue;
 
       const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(file, ".js");
@@ -539,6 +550,7 @@ async function runAutoSync() {
       const version     = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
 
       try {
+
         const rawUrl = await uploadToPastebin(code, name);
         const uploadCode = rawUrl || code;
         const result = await apiUpload({ name, category, description, author, code: uploadCode, kind, version });
@@ -546,7 +558,7 @@ async function runAutoSync() {
           cache[cacheKey] = { hash, id: result._id || result.id };
           const tag = result._duplicate ? "already stored" : "uploaded as new entry";
           console.log(`[goatstore-sync] ${file}: ${tag} (ID: ${cache[cacheKey].id})`);
-          // Save Pastebin link if we have it
+
           if (rawUrl && cache[cacheKey].id && !result.pastebin_url) {
             apiSetPastebin(cache[cacheKey].id, rawUrl).catch(() => {});
           }
@@ -562,6 +574,7 @@ async function runAutoSync() {
   }
   saveJson(SYNC_CACHE_PATH, cache);
 }
+
 let _watchDebounce = null;
 let _watchersStarted = false;
 
@@ -575,12 +588,17 @@ function startAutoSyncWatcher() {
     try {
       fs.watch(dir, { persistent: false }, (eventType, filename) => {
         if (!filename || !filename.endsWith(".js")) return;
+
         clearTimeout(_watchDebounce);
         _watchDebounce = setTimeout(() => {
           runAutoSync().catch(() => {});
         }, 3000);
       });
     } catch (_) {
+
+    }
+  }
+}
 
 async function getTodayUpdates() {
   try {
@@ -679,7 +697,6 @@ async function renderSearchInto(query, category, page, limit) {
   return { text: msg.trim(), totalPages };
 }
 
-
 function buildMenu(prefix) {
   const p = `${prefix}gs`;
   return (
@@ -713,7 +730,7 @@ module.exports = {
   config: {
     name:             "goatstore",
     aliases:          ["gs", "store", "cmdstore"],
-    version:          "1.0.1",
+    version:          "1.0.0",
     author:           "Hridoy Hossen",
     countDown:        3,
     role:             0,
@@ -742,25 +759,29 @@ module.exports = {
   },
 
   onLoad: function () {
+
     setTimeout(() => {
       maybeAutoUpdate(null, null).catch(() => {});
       setInterval(() => maybeAutoUpdate(null, null).catch(() => {}), CONFIG.UPDATE_CHECK_INTERVAL);
     }, 6000);
+
     if (module.exports.config.autoSync) {
       setTimeout(() => {
         runAutoSync().catch(() => {});
         setInterval(() => runAutoSync().catch(() => {}), CONFIG.AUTO_SYNC_INTERVAL);
       }, 10000);
+
       if (CONFIG.AUTO_SYNC_WATCH) startAutoSyncWatcher();
     }
   },
 
   onReply: async function ({ api, event, Reply }) {
     const { threadID, body, senderID } = event;
+
     const delMatch = body.match(/^delete\s+(\S+)/i);
     if (delMatch) {
       const rawId = delMatch[1];
-      const id = rawId.replace(/^#/, ""); 
+      const id = rawId.replace(/^#/, "");
       try {
         await apiDelete(id);
         return api.sendMessage(`🗑️ Deleted! ID: ${rawId}`, threadID);
@@ -828,6 +849,7 @@ module.exports = {
 
     const prefix = getPrefix(threadData || event?.threadData);
     const sub    = args[0]?.toLowerCase() || null;
+
     maybeAutoUpdate(api, threadID).catch(() => {});
 
     if (!sub) {
@@ -841,6 +863,7 @@ module.exports = {
       }
       return api.sendMessage(buildMenu(prefix), threadID);
     }
+
     if (sub === "n" || sub === "notification") {
       const updates = await getTodayUpdates();
       if (!updates.length)
@@ -864,6 +887,7 @@ module.exports = {
     }
 
     if (sub === "list" || sub === "ls") {
+
       const maybeCategory = args[1]?.toLowerCase();
       const isCategory    = CONFIG.CATEGORIES.includes(maybeCategory);
       const category      = isCategory ? maybeCategory : "";
@@ -878,6 +902,7 @@ module.exports = {
         if (!id) return api.sendMessage(`❌ Usage: ${prefix}gs event install <id>`, threadID);
         return doInstall(api, threadID, id, "event");
       }
+
       const q = args.slice(1).join(" ");
       return sendSearchPage(api, threadID, senderID, q, "", 1, 5, prefix);
     }
@@ -891,7 +916,7 @@ module.exports = {
     if (sub === "like") {
       const rawId = args[1];
       if (!rawId) return api.sendMessage(`❌ Usage: ${prefix}gs like <id>`, threadID);
-      const id = rawId.replace(/^#/, ""); // B8 fix: strip # prefix
+      const id = rawId.replace(/^#/, "");
       try {
         const res = await apiLike(id, getVisitorId());
         if (res.liked)
@@ -928,6 +953,7 @@ module.exports = {
           `📁 Usage:\n• ${prefix}gs upload <fileName>\n• ${prefix}gs upload event <fileName>`,
           threadID
         );
+
       const cwd = process.cwd();
       const stdCmds   = path.join(cwd, "scripts", "cmds");
       const stdEvents = path.join(cwd, "scripts", "events");
@@ -1006,7 +1032,7 @@ module.exports = {
     if (sub === "delete") {
       const rawId = args[1];
       if (!rawId) return api.sendMessage(`❌ Usage: ${prefix}gs delete <id>`, threadID);
-      const id = rawId.replace(/^#/, ""); // B9 fix: strip # prefix
+      const id = rawId.replace(/^#/, "");
       try {
         await apiDelete(id);
         return api.sendMessage(`🗑️ Deleted! ID: ${rawId}`, threadID);
