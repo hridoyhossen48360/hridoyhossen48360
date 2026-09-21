@@ -1,18 +1,25 @@
 "use strict";
 
-const fs   = require("fs");
-const path = require("path");
-const axios = require("axios");
+const fs     = require("fs");
+const path   = require("path");
+const axios  = require("axios");
+const crypto = require("crypto");
 
-const _H = "https://hridoy-api.onrender.com";
-function _api(path = "") { return `${_H}/api/gs${path}`; }
+const LOCAL_CFG = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(process.cwd(), "goatstore_config.json"), "utf8")); }
+  catch (_) { return {}; }
+})();
 
 const CONFIG = {
-  API_HOST: "https://hridoy-api.onrender.com",
+
+  API_URL: "https://hridoy-api.onrender.com",
+
+  ADMIN_USER: process.env.GOATSTORE_ADMIN_USER || LOCAL_CFG.ADMIN_USER || "",
+  ADMIN_PASS: process.env.GOATSTORE_ADMIN_PASS || LOCAL_CFG.ADMIN_PASS || "",
 
   UPDATE_CHECK_INTERVAL: 1000 * 60 * 30,
 
-  PASTEBIN_API_KEY: "gox0XMEkCRsKqzS5Jh9ffKD4mv7vya-3",
+  PASTEBIN_API_KEY: process.env.GOATSTORE_PASTEBIN_KEY || LOCAL_CFG.PASTEBIN_API_KEY || "",
 
   AUTO_SYNC: true,
 
@@ -25,12 +32,22 @@ const CONFIG = {
   MAX_EDITS_PER_MESSAGE: 5,
 };
 
+const RESERVED_NAMES = ["goatstore", "autosync"];
+const GS_PATH = "/api/gs";
+function gsApi(p) { return `${CONFIG.API_URL}${GS_PATH}${p}`; }
+
 const SYNC_CACHE_PATH = path.join(process.cwd(), "goatstore_sync_cache.json");
 const DIR_CACHE_PATH  = path.join(process.cwd(), "goatstore_dircache.json");
 
 const userSeenNoti      = new Map();
 let   _updateCheckCache = null;
 let   _autoupdateInFlight = false;
+
+function isAllowed(senderID) {
+  const adminUIDs = global.GoatBot?.config?.adminBot;
+  if (!Array.isArray(adminUIDs)) return false;
+  return adminUIDs.map(String).includes(String(senderID));
+}
 
 function getPrefix(threadData) {
   try {
@@ -102,9 +119,7 @@ function cmpVer(a, b) {
 }
 
 function hashContent(content) {
-  let h = 0;
-  for (let i = 0; i < content.length; i++) h = (h * 31 + content.charCodeAt(i)) | 0;
-  return h.toString(16);
+  return crypto.createHash("sha1").update(String(content)).digest("hex");
 }
 
 function detectFramework(code) {
@@ -115,44 +130,96 @@ function detectFramework(code) {
   return isGoat ? "goat" : "other";
 }
 
+function extractMeta(code, fallbackName = "unknown", preferLongDesc = false) {
+  const cfgIdx = code.search(/\bconfig\s*[:=]\s*\{/);
+  const scoped = cfgIdx >= 0 ? code.slice(cfgIdx, cfgIdx + 6000) : code;
+  const pick = (key) => {
+    const rx = new RegExp(
+      String.raw`(?:^|[\s,{"'])` + key + String.raw`["']?\s*:\s*(["'\x60])((?:\\.|(?!\1)[^\\\n])*)\1`, "m");
+    return (scoped.match(rx) || code.match(rx) || [])[2];
+  };
+  const rawCat = String(pick("category") || "utility").trim().toLowerCase();
+  return {
+    name:        (pick("name") || fallbackName).trim(),
+    author:      (pick("author") || "Unknown").trim(),
+    version:     (pick("version") || "1.0.0").trim(),
+    category:    rawCat,
+    description: ((preferLongDesc && pick("longDescription")) || pick("shortDescription") || pick("longDescription") || "No description").trim(),
+  };
+}
+
+function adminHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "user": CONFIG.ADMIN_USER,
+    "pass": CONFIG.ADMIN_PASS,
+  };
+}
+
 function displayId(cmd) {
-  if (cmd && Number.isInteger(cmd.seq)) return "#" + String(cmd.seq).padStart(2, "0");
   return cmd?._id || cmd?.id || "N/A";
 }
 
-async function apiSearch(q = "", category = "", limit = 0, kind = "") {
+async function apiSearch(q = "", category = "", limit = 0, kind = "", author = "") {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
+  if (author && !q) params.set("author", author);
   if (category && category !== "all") params.set("category", category);
   if (kind) params.set("kind", kind);
   if (limit) params.set("limit", limit);
-  const res = await axios.get(`${_api("/commands")}?${params.toString()}`);
+  const res = await axios.get(gsApi(`/commands?${params.toString()}`));
   return Array.isArray(res.data) ? res.data : [];
 }
 
 async function apiTrending(limit = 10) {
-  const res = await axios.get(`${_api("/commands/trending")}?limit=${limit}`);
+  const res = await axios.get(gsApi(`/commands/trending?limit=${limit}`));
   const data = Array.isArray(res.data) ? res.data : [];
   return data.slice(0, limit);
 }
 
+function cleanId(id) { return encodeURIComponent(String(id).trim().replace(/^#/, "")); }
+
 async function apiGetOne(id) {
-  const res = await axios.get(_api(`/commands/${id}`));
-  return res.data || null;
+  let res;
+  try {
+    res = await axios.get(gsApi(`/commands/${cleanId(id)}`), { timeout: 15000, validateStatus: () => true });
+  } catch (err) {
+    const e = new Error(err.code === "ECONNABORTED" ? "Request timed out." : (err.message || "Network error."));
+    e.status = 0;
+    throw e;
+  }
+  if (res.status === 404) return null;
+  if (res.status >= 400) {
+    const apiMsg = (res.data && typeof res.data === "object" && res.data.error) || `Store API returned HTTP ${res.status}`;
+    const e = new Error(apiMsg);
+    e.status = res.status;
+    throw e;
+  }
+  const d = res.data;
+  return d && typeof d === "object" && !Array.isArray(d) ? d : null;
 }
 
 async function apiUpload({ name, category, description, author, code, kind, version }) {
+  const headers = { "Content-Type": "application/json" };
+
+  if (RESERVED_NAMES.includes(String(name).toLowerCase()) && CONFIG.ADMIN_USER && CONFIG.ADMIN_PASS) {
+    headers.user = CONFIG.ADMIN_USER;
+    headers.pass = CONFIG.ADMIN_PASS;
+  }
   const res = await axios.post(
-    _api("/commands"),
+    gsApi(`/commands`),
     { name, category, description, author, code, kind, version },
-    { headers: { "Content-Type": "application/json" } }
+    { headers, timeout: 30000, validateStatus: () => true }
   );
-  return { ...res.data, _created: res.status === 201 };
+  const data = res.data && typeof res.data === "object" ? res.data : {};
+  const out  = { ...data, _status: res.status, _created: res.status === 201, _duplicate: res.status === 409 && data._duplicate === true };
+  if (res.status >= 400 && !out.error) out.error = `Store API returned HTTP ${res.status}`;
+  return out;
 }
 
 async function apiLike(id, visitorId) {
   const res = await axios.post(
-    _api(`/commands/${id}/like`),
+    gsApi(`/commands/${cleanId(id)}/like`),
     { visitor_id: visitorId },
     { headers: { "Content-Type": "application/json" } }
   );
@@ -161,13 +228,14 @@ async function apiLike(id, visitorId) {
 
 async function apiDelete(id) {
   const res = await axios.delete(
-    _api(`/commands/${id}`),
-    { headers: { "Content-Type": "application/json" } }
+    gsApi(`/commands/${cleanId(id)}`),
+    { headers: adminHeaders() }
   );
   return res.data;
 }
 
 async function uploadToPastebin(code, pasteName = "GoatBot Command") {
+  if (!CONFIG.PASTEBIN_API_KEY) return null;
   try {
     const params = new URLSearchParams();
     params.set("api_dev_key",       CONFIG.PASTEBIN_API_KEY);
@@ -194,12 +262,36 @@ async function uploadToPastebin(code, pasteName = "GoatBot Command") {
   }
 }
 
+async function apiCountInstall(id) {
+  try { await axios.post(gsApi(`/commands/${cleanId(id)}/install`), {}, { timeout: 8000 }); }
+  catch (_) {}
+}
+
+async function apiRawLink(id) {
+  try {
+    const res = await axios.post(gsApi(`/commands/${cleanId(id)}/rawlink`), {}, { timeout: 20000 });
+    const u = res.data?.url;
+    return typeof u === "string" && u.startsWith("http") ? u : null;
+  } catch (_) { return null; }
+}
+
+async function getRawLink(cmd) {
+  if (cmd.pastebin_url) return cmd.pastebin_url;
+  const id = cmd._id || cmd.id;
+  let url = id ? await apiRawLink(id) : null;
+  if (!url && cmd.code && CONFIG.PASTEBIN_API_KEY) {
+    url = await uploadToPastebin(cmd.code, cmd.name || "GoatBot Command");
+    if (url && id) await apiSetPastebin(id, url);
+  }
+  return url;
+}
+
 async function apiSetPastebin(id, rawUrl) {
   try {
     await axios.patch(
-      _api(`/commands/${id}/pastebin`),
+      gsApi(`/commands/${cleanId(id)}/pastebin`),
       { url: rawUrl },
-      { headers: { "Content-Type": "application/json" } }
+      { headers: adminHeaders() }
     );
   } catch (_) {}
 }
@@ -292,13 +384,21 @@ async function doInstall(api, threadID, id, forceKind = null) {
   let cmd = null;
   try {
     cmd = await apiGetOne(id);
-  } catch (_) {}
+  } catch (err) {
+    return api.sendMessage(
+      `❌ Failed to fetch command.\n` +
+      `╭─‣ ID : ${id}\n` +
+      `├‣ Reason : ${err.message}${err.status ? ` (HTTP ${err.status})` : ""}\n` +
+      `╰────────────◊`,
+      threadID
+    );
+  }
 
-  if (!cmd) return api.sendMessage("❌ Command not found.", threadID);
+  if (!cmd) return api.sendMessage(`❌ Command not found for ID: ${id}`, threadID);
   if (!cmd.code && !cmd.pastebin_url)
     return api.sendMessage("❌ Command has no code or Pastebin link stored.", threadID);
 
-  const isEvent = forceKind === "event";
+  const isEvent = forceKind ? forceKind === "event" : cmd.kind === "event";
 
   let code = cmd.code || "";
   if (!code && cmd.pastebin_url) {
@@ -325,12 +425,18 @@ async function doInstall(api, threadID, id, forceKind = null) {
   try { pid = await animateInstall(api, threadID, displayName); } catch (_) {}
 
   const installDir = isEvent ? getEventsDir() : getCmdsDir();
-  const fileName   = displayName.replace(/\s+/g, "_") + ".js";
-  const filePath   = path.join(installDir, fileName);
-  const locLabel   = path.relative(process.cwd(), filePath);
+
+  const safeName = String(displayName).replace(/[^\w\-. ]+/g, "").trim().replace(/\s+/g, "_").replace(/^\.+/, "") || `gs_${id}`;
+  const fileName = safeName + ".js";
+  const filePath = path.join(installDir, fileName);
+  const locLabel = path.relative(process.cwd(), filePath);
 
   try {
+    if (path.dirname(path.resolve(filePath)) !== path.resolve(installDir)) throw new Error("Unsafe file name.");
     if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
+
+    if (fs.existsSync(filePath) && fs.readFileSync(filePath, "utf8") !== code)
+      fs.copyFileSync(filePath, filePath + ".bak");
     fs.writeFileSync(filePath, code, "utf-8");
   } catch (err) {
     if (pid) api.unsendMessage(pid).catch(() => {});
@@ -338,20 +444,16 @@ async function doInstall(api, threadID, id, forceKind = null) {
   }
 
   const load = isEvent ? { success: false } : autoloadCommand(filePath);
+  apiCountInstall(cmd._id || id);
 
   const msg =
     `✅ Installed Successfully!\n` +
-    `╭─‣ Name     : ${cmd.name || "Unknown"}\n` +
-    `├‣ Author    : ${cmd.author || "Unknown"}\n` +
-    `├‣ Category  : ${catBadge(cmd)}\n` +
-    `├‣ Version   : v${cmd.version || "1.0.0"}\n` +
-    `├‣ Type      : ${cmd.kind === "event" ? "⚡ Event" : "🧩 Command"}\n` +
-    `├‣ ID        : ${displayId(cmd)}\n` +
-    `├‣ Likes     : ❤️ ${cmd.likes || 0}\n` +
-    `├‣ Location  : ${locLabel}\n` +
+    `╭─‣ Name : ${cmd.name || "Unknown"}\n` +
+    `├‣ Author : ${cmd.author || "Unknown"}\n` +
+    `├‣ Category : ${catBadge(cmd)}\n` +
+    `├‣ ID : ${displayId(cmd)}\n` +
+    `├‣ Location : ${locLabel}\n` +
     `╰────────────◊\n` +
-    `📝 ${cmd.description || cmd.shortDescription || "No description"}\n` +
-    `📅 Added: ${new Date(cmd.createdAt || Date.now()).toDateString()}\n` +
     (load.success
       ? `🚀 "${load.name}" is now live! No restart needed.`
       : isEvent
@@ -376,32 +478,27 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   try { new Function(code); }
   catch (err) { return api.sendMessage(`❌ Syntax Error:\n${err.message}`, threadID); }
 
-  const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(filePath, ".js");
-  const author      = code.match(/author\s*:\s*["'`](.*?)["'`]/)?.[1] || "Unknown";
-  const description = code.match(/longDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
-                   || code.match(/shortDescription\s*:\s*["'`](.*?)["'`]/)?.[1]
-                   || "No description";
-
-  const rawCat  = (code.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "utility").toLowerCase();
-  const category = CONFIG.CATEGORIES.includes(rawCat) ? rawCat : "utility";
-  const version = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
+  const { name, author, description, category, version } = extractMeta(code, path.basename(filePath, ".js"), true);
 
   let pid;
   try { pid = await animateUpload(api, threadID, name); } catch (_) {}
 
   try {
+    const result = await apiUpload({ name, category, description, author, code, kind, version });
 
-    let rawUrl = null;
-    rawUrl = await uploadToPastebin(code, name);
-    if (!rawUrl) {
+    if (result._duplicate) {
       if (pid) api.unsendMessage(pid).catch(() => {});
       return api.sendMessage(
-        `❌ Pastebin Upload Failed!\n╭─‣ Name : ${name}\n├‣ Reason : Could not upload code to Pastebin\n╰────────────◊\n💡 Check CONFIG.PASTEBIN_API_KEY or try again.`,
+        `⚠️ Command Already Exists!\n` +
+        `╭─‣ Name : ${name}\n` +
+        `├‣ Author : ${author}\n` +
+        `├‣ Version : v${version}\n` +
+        `├‣ ID : ${displayId(result)}\n` +
+        `╰────────────◊\n` +
+        `💡 "${name}" by ${author} v${version} is already in the store. Change the version number to update it.`,
         threadID
       );
     }
-
-    const result = await apiUpload({ name, category, description, author, code: rawUrl, kind, version });
 
     if (result.error) {
       if (pid) api.unsendMessage(pid).catch(() => {});
@@ -411,32 +508,137 @@ async function doUpload(api, threadID, filePath, kind = "command") {
       );
     }
 
-    const isDuplicate = result._duplicate === true;
-    const newId = result._id || result.id;
+    const isUpdated = result._updated === true;
+    const newId     = result._id || result.id;
 
-    if (rawUrl && newId && !result.pastebin_url) {
-      apiSetPastebin(newId, rawUrl).catch(() => {});
-    }
+    let rawUrl = result.pastebin_url || null;
+    if (!rawUrl && newId && code) rawUrl = await getRawLink({ ...result, code });
 
     const sameNameCount = result._sameNameCount || 0;
-    const displayedId   = displayId(result) !== "N/A" ? displayId(result) : (newId || "N/A");
+
+    let statusLine, footerLine;
+    if (isUpdated) {
+      statusLine = `♻️ Command Updated!`;
+      footerLine = `🔄 "${name}" by ${author} updated to v${version} — old version overwritten.\n📅 Updated: ${new Date().toDateString()}`;
+    } else {
+      statusLine = `✅ Upload Successful!`;
+      footerLine = sameNameCount > 0
+        ? `📌 ${sameNameCount} other command(s) use the name "${name}" (different author) — saved as separate entry.\n📅 Uploaded: ${new Date().toDateString()}`
+        : `📅 Uploaded: ${new Date().toDateString()}`;
+    }
 
     const msg =
-      `${isDuplicate ? "⏭️ Already Up To Date" : "✅ Upload Successful!"}\n` +
-      `╭─‣ Name     : ${name}\n` +
-      `├‣ Category  : ${catBadge({ category })}\n` +
-      `├‣ Author    : ${author}\n` +
-      `├‣ Version   : v${version}\n` +
-      `├‣ Type      : ${kind === "event" ? "⚡ Event" : "🧩 Command"}\n` +
-      `├‣ ID        : ${displayedId}\n` +
-      `├‣ Raw Link  : ${rawUrl}\n` +
+      `${statusLine}\n` +
+      `╭─‣ Name : ${name}\n` +
+      `├‣ Category : ${catBadge({ category })}\n` +
+      `├‣ Author : ${author}\n` +
+      `├‣ Version : v${version}\n` +
+      `├‣ ID : ${displayId(result) !== "N/A" ? displayId(result) : (newId || "N/A")}\n` +
+      (rawUrl ? `├‣ Raw Link : ${rawUrl}\n` : "") +
       `╰────────────◊\n` +
-      `📝 ${description}\n` +
-      (isDuplicate
-        ? `💡 Identical code is already stored under this name at the ID above — nothing new was created.`
-        : sameNameCount > 0
-        ? `📌 ${sameNameCount} other command(s) already use the name "${name}" — this upload was saved as a separate new entry, they were not affected.\n📅 Uploaded: ${new Date().toDateString()}`
-        : `📅 Uploaded: ${new Date().toDateString()}`);
+      footerLine;
+
+    if (pid) {
+      try { await api.editMessage(msg, pid); }
+      catch (_) { api.sendMessage(msg, threadID); }
+    } else {
+      api.sendMessage(msg, threadID);
+    }
+  } catch (err) {
+
+    if (pid) api.unsendMessage(pid).catch(() => {});
+    api.sendMessage(
+      `❌ Store API Call Failed!\n├‣ Error : ${err.message || "Unknown error"}\n╰────────────◊\n💡 Check network or store backend.`,
+      threadID
+    );
+  }
+}
+
+async function doUpdate(api, threadID, filePath, kind = "command", prefix = "!") {
+  let code;
+  try { code = fs.readFileSync(filePath, "utf8"); }
+  catch (err) { return api.sendMessage(`❌ Read failed:\n${err.message}`, threadID); }
+
+  try { new Function(code); }
+  catch (err) { return api.sendMessage(`❌ Syntax Error:\n${err.message}`, threadID); }
+
+  const { name, author, description, category, version } = extractMeta(code, path.basename(filePath, ".js"), true);
+
+  let pid;
+  try { pid = await animateUpload(api, threadID, `${name} (update)`); } catch (_) {}
+
+  try {
+    const matches = await apiSearch(name, "", 0, kind).catch(() => []);
+    const existing = matches.find(c =>
+      String(c.name || "").trim().toLowerCase() === String(name).trim().toLowerCase() &&
+      String(c.author || "").trim().toLowerCase() === String(author).trim().toLowerCase()
+    );
+
+    if (!existing) {
+      if (pid) api.unsendMessage(pid).catch(() => {});
+      return api.sendMessage(
+        `❌ No existing "${name}" by ${author} found in the store.\n` +
+        `💡 Use ${prefix}gs upload instead to add it as a new entry.`,
+        threadID
+      );
+    }
+
+    const oldId      = existing._id || existing.id;
+    const oldVersion = existing.version || "0.0.0";
+
+    if (cmpVer(version, oldVersion) === 0) {
+      if (pid) api.unsendMessage(pid).catch(() => {});
+      return api.sendMessage(
+        `⚠️ Same Version!\n` +
+        `╭─‣ Name : ${name}\n` +
+        `├‣ Current : v${oldVersion}\n` +
+        `╰────────────◊\n` +
+        `💡 Bump the version number in your file before updating.`,
+        threadID
+      );
+    }
+
+    try {
+      await apiDelete(oldId);
+    } catch (err) {
+      if (pid) api.unsendMessage(pid).catch(() => {});
+      const e = err.response?.data?.error || err.message;
+      return api.sendMessage(
+        `❌ Failed to remove old version (ID: ${oldId}):\n${e}`,
+        threadID
+      );
+    }
+
+    const result = await apiUpload({ name, category, description, author, code, kind, version });
+
+    if (result.error) {
+      if (pid) api.unsendMessage(pid).catch(() => {});
+      return api.sendMessage(
+        `⚠️ Update Failed After Delete!\n` +
+        `╭─‣ Name : ${name}\n` +
+        `├‣ Error : ${result.error}\n` +
+        `├‣ Note : Old ID (${oldId}) was already removed — please re-upload manually.\n` +
+        `╰────────────◊`,
+        threadID
+      );
+    }
+
+    const newId = result._id || result.id;
+    let rawUrl  = result.pastebin_url || null;
+    if (!rawUrl && newId && code) rawUrl = await getRawLink({ ...result, code });
+
+    const msg =
+      `♻️ Command Updated (Overwritten)!\n` +
+      `╭─‣ Name : ${name}\n` +
+      `├‣ Category : ${catBadge({ category })}\n` +
+      `├‣ Author : ${author}\n` +
+      `├‣ Old Version : v${oldVersion}\n` +
+      `├‣ New Version : v${version}\n` +
+      `├‣ Old ID : ${oldId}\n` +
+      `├‣ New ID : ${newId || "N/A"}\n` +
+      (rawUrl ? `├‣ Raw Link : ${rawUrl}\n` : "") +
+      `╰────────────◊\n` +
+      `📅 Updated: ${new Date().toDateString()}`;
 
     if (pid) {
       try { await api.editMessage(msg, pid); }
@@ -446,23 +648,11 @@ async function doUpload(api, threadID, filePath, kind = "command") {
     }
   } catch (err) {
     if (pid) api.unsendMessage(pid).catch(() => {});
-    const errMsg = err.response?.data?.error || err.message || "Unknown error";
-
-    if (err.response?.status === 409) {
-      return api.sendMessage(
-        `⚠️ Already Exists in Store!\n╭─‣ Name : ${name}\n╰────────────◊\n💡 A command with that name already exists.`,
-        threadID
-      );
-    }
     api.sendMessage(
-      `❌ Store API Call Failed!\n├‣ Error : ${errMsg}\n╰────────────◊\n💡 Check network or store backend.`,
+      `❌ Update API Call Failed!\n├‣ Error : ${err.message || "Unknown error"}\n╰────────────◊\n💡 Check network or store backend.`,
       threadID
     );
   }
-}
-
-function getPfxHint() {
-  try { return getPrefix(); } catch (_) { return "!"; }
 }
 
 async function checkSelfUpdate() {
@@ -472,7 +662,12 @@ async function checkSelfUpdate() {
   try {
 
     const cmds = await apiSearch("goatstore");
-    const match = cmds.find(c => c.name?.toLowerCase() === "goatstore");
+
+    const myAuthor = String(module.exports.config.author || "").trim().toLowerCase();
+    const match = cmds.find(c =>
+      String(c.name || "").trim().toLowerCase() === "goatstore" &&
+      (c.kind || "command") === "command" &&
+      String(c.author || "").trim().toLowerCase() === myAuthor);
     if (!match) { _updateCheckCache = { checkedAt: now, result: null }; return null; }
     const current = module.exports.config.version;
     const latest  = match.version || "0.0.0";
@@ -493,6 +688,8 @@ async function doSelfUpdateSilent(api, threadID, selfUpdate) {
     const cmd = await apiGetOne(selfUpdate.latestId);
     if (!cmd?.code) return false;
     try { new Function(cmd.code); } catch (_) { return false; }
+    if (detectFramework(cmd.code) !== "goat") return false;
+    try { fs.copyFileSync(__filename, __filename + ".bak"); } catch (_) {}
     fs.writeFileSync(__filename, cmd.code, "utf-8");
     const load = autoloadCommand(__filename);
     if (api && threadID) {
@@ -517,62 +714,76 @@ async function maybeAutoUpdate(api, threadID) {
   finally { _autoupdateInFlight = false; }
 }
 
+let _syncRunning = false;
+const _warned401 = new Set();
+
 async function runAutoSync() {
-  const folders = [
-    { dir: getCmdsDir(),    kind: "command" },
-    { dir: getEventsDir(),  kind: "event" },
-  ].filter(f => fs.existsSync(f.dir));
+  const summary = { uploaded: 0, updated: 0, duplicates: 0, unchanged: 0, errors: 0, busy: false };
 
-  if (!folders.length) return;
-  const cache = loadJson(SYNC_CACHE_PATH, {});
+  if (_syncRunning) { summary.busy = true; return summary; }
+  _syncRunning = true;
 
-  for (const { dir, kind } of folders) {
-    const files = fs.readdirSync(dir).filter(f => f.endsWith(".js"));
-    for (const file of files) {
-      const fullPath = path.join(dir, file);
-      let code;
-      try { code = fs.readFileSync(fullPath, "utf8"); } catch (_) { continue; }
+  try {
+    const folders = [
+      { dir: getCmdsDir(),    kind: "command" },
+      { dir: getEventsDir(),  kind: "event" },
+    ].filter(f => f.dir && fs.existsSync(f.dir));
 
-      const hash     = hashContent(code);
+    if (!folders.length) return summary;
+    const cache = loadJson(SYNC_CACHE_PATH, {});
 
-      const cacheKey = `${kind}:${file}:${version}`;
-      if (cache[cacheKey]?.hash === hash) continue;
+    for (const { dir, kind } of folders) {
+      let files = [];
+      try { files = fs.readdirSync(dir).filter(f => f.endsWith(".js")); } catch (_) { continue; }
 
-      try { new Function(code); } catch (_) { continue; }
+      for (const file of files) {
+        const fullPath = path.join(dir, file);
+        let code;
+        try { code = fs.readFileSync(fullPath, "utf8"); } catch (_) { continue; }
 
-      if (detectFramework(code) !== "goat") continue;
+        try { new Function(code); } catch (_) { continue; }
 
-      const name        = code.match(/name\s*:\s*["'`](.*?)["'`]/)?.[1] || path.basename(file, ".js");
-      const author      = code.match(/author\s*:\s*["'`](.*?)["'`]/)?.[1] || "Unknown";
-      const description = code.match(/shortDescription\s*:\s*["'`](.*?)["'`]/)?.[1] || "No description";
-      const rawCat      = (code.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "utility").toLowerCase();
-      const category    = CONFIG.CATEGORIES.includes(rawCat) ? rawCat : "utility";
-      const version     = code.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "1.0.0";
+        if (detectFramework(code) !== "goat") continue;
 
-      try {
+        const { name, author, description, category, version } = extractMeta(code, path.basename(file, ".js"));
 
-        const rawUrl = await uploadToPastebin(code, name);
-        const uploadCode = rawUrl || code;
-        const result = await apiUpload({ name, category, description, author, code: uploadCode, kind, version });
-        if (!result.error) {
-          cache[cacheKey] = { hash, id: result._id || result.id };
-          const tag = result._duplicate ? "already stored" : "uploaded as new entry";
-          console.log(`[goatstore-sync] ${file}: ${tag} (ID: ${cache[cacheKey].id})`);
+        const hash = hashContent(code);
 
-          if (rawUrl && cache[cacheKey].id && !result.pastebin_url) {
-            apiSetPastebin(cache[cacheKey].id, rawUrl).catch(() => {});
+        const cacheKey = `${kind}:${file}:${version}`;
+        if (cache[cacheKey]?.hash === hash) { summary.unchanged++; continue; }
+
+        try {
+          const result = await apiUpload({ name, category, description, author, code, kind, version });
+          if (result._duplicate) {
+
+            cache[cacheKey] = { hash, id: result._id || result.id };
+            summary.duplicates++;
+            console.log(`[goatstore-sync] ${file}: already exists (${name} by ${author} v${version}) — skipped. Bump the version to update it.`);
+          } else if (!result.error) {
+            cache[cacheKey] = { hash, id: result._id || result.id };
+            if (result._updated) summary.updated++; else summary.uploaded++;
+            const tag = result._updated ? `updated to v${version}` : "uploaded as new entry";
+            console.log(`[goatstore-sync] ${file}: ${tag} (ID: ${displayId(result)})`);
+          } else if (result._status === 401) {
+
+            summary.unchanged++;
+            if (!_warned401.has(file)) { _warned401.add(file); console.log(`[goatstore-sync] ${file}: not synced — ${result.error}`); }
+          } else {
+            summary.errors++;
+            console.log(`[goatstore-sync] ${file}: skipped — ${result.error}`);
           }
-        } else {
-          console.log(`[goatstore-sync] ${file}: skipped — ${result.error}`);
+        } catch (err) {
+          summary.errors++;
+          console.error(`[goatstore-sync] ${file}: error — ${err.message}`);
         }
-      } catch (err) {
-        const e = err.response?.data?.error || err.message;
-        console.error(`[goatstore-sync] ${file}: error — ${e}`);
+        await new Promise(r => setTimeout(r, 600));
       }
-      await new Promise(r => setTimeout(r, 600));
     }
+    saveJson(SYNC_CACHE_PATH, cache);
+    return summary;
+  } finally {
+    _syncRunning = false;
   }
-  saveJson(SYNC_CACHE_PATH, cache);
 }
 
 let _watchDebounce = null;
@@ -638,7 +849,8 @@ async function sendListPage(api, threadID, senderID, category, page, limit, pref
     let msg = `${label} — Page ${page}/${totalPages} (${total} total)\n\n`;
     items.forEach(cmd => { msg += renderCmdRow(cmd); });
     if (totalPages > 1)
-      msg += `Reply "page <number>" or react ➡ to go to next page.\n`;
+      msg += `Reply "page <number>" or react ➡ to go to next page.\n` +
+             `💬 Reply "delete <id>" to remove (admin only).`;
 
     const sent = await api.sendMessage(msg.trim(), threadID);
     if (totalPages > 1) {
@@ -652,23 +864,31 @@ async function sendListPage(api, threadID, senderID, category, page, limit, pref
   } catch (_) { api.sendMessage("❌ List API error.", threadID); }
 }
 
-async function sendSearchPage(api, threadID, senderID, query, category, page, limit, prefix) {
+function searchTitle(query, category, kind, author) {
+  if (query)  return `🔍 Search: "${query}"`;
+  if (author) return `👤 Author: ${author}`;
+  if (kind)   return `${kind === "event" ? "⚡ Events" : "🧩 Commands"}${category ? ` — ${category}` : ""}`;
+  return `📂 Category: ${category || "all"}`;
+}
+
+async function sendSearchPage(api, threadID, senderID, query, category, page, limit, prefix, kind = "", author = "") {
   try {
-    const all  = await apiSearch(query, category);
+    const all  = await apiSearch(query, category, 0, kind, author);
     const { items, total, totalPages } = paginateArray(all, page, limit);
     if (!items.length)
-      return api.sendMessage(`❌ No results${query ? ` for "${query}"` : ""}.`, threadID);
+      return api.sendMessage(`❌ No results${query ? ` for "${query}"` : author ? ` for author "${author}"` : ""}.`, threadID);
 
-    const title = query ? `🔍 Search: "${query}"` : `📂 Category: ${category || "all"}`;
+    const title = searchTitle(query, category, kind, author);
     let msg = `${title} (${total} found)\n\n`;
     items.forEach(cmd => { msg += renderCmdRow(cmd); });
     if (totalPages > 1)
       msg += `Page ${page}/${totalPages}\nReply "page <number>" or react ➡ next page.\n`;
+    msg += `💬 Reply "delete <id>" to remove (admin only).`;
 
     const sent = await api.sendMessage(msg.trim(), threadID);
     const h = {
       commandName: "goatstore", messageID: sent.messageID,
-      mode: "search", query, category, page, totalPages, limit, senderID, editCount: 0,
+      mode: "search", query, category, kind, author, page, totalPages, limit, senderID, editCount: 0,
     };
     global.GoatBot.onReply.set(sent.messageID, h);
     if (totalPages > 1) global.GoatBot.onReaction.set(sent.messageID, h);
@@ -686,11 +906,11 @@ async function renderListInto(category, page, limit) {
   return { text: msg.trim(), totalPages };
 }
 
-async function renderSearchInto(query, category, page, limit) {
-  const all  = await apiSearch(query, category);
+async function renderSearchInto(query, category, page, limit, kind = "", author = "") {
+  const all  = await apiSearch(query, category, 0, kind, author);
   const { items, total, totalPages } = paginateArray(all, page, limit);
   if (!items.length) return null;
-  const title = query ? `🔍 Search: "${query}"` : `📂 Category: ${category || "all"}`;
+  const title = searchTitle(query, category, kind, author);
   let msg = `${title} (${total} found)\n\n`;
   items.forEach(cmd => { msg += renderCmdRow(cmd); });
   if (totalPages > 1) msg += `Page ${page}/${totalPages}\nReact ➡ next page.`;
@@ -716,8 +936,10 @@ function buildMenu(prefix) {
     `• ${p} trending     — Top trending\n` +
     `• ${p} upload <file>       — Upload command\n` +
     `• ${p} upload event <file> — Upload event\n` +
+    `• ${p} update <file>       — Overwrite existing (same name+author, new version)\n` +
+    `• ${p} update event <file> — Overwrite existing event\n` +
     `• ${p} rawlink <id> — Get raw Pastebin link\n` +
-    `• ${p} delete <id>  — Delete a command\n` +
+    `• ${p} delete <id>  — Delete (admin)\n` +
     `• ${p} sync         — Manual sync\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `Categories: ${CONFIG.CATEGORIES.join(", ")}\n` +
@@ -730,7 +952,7 @@ module.exports = {
   config: {
     name:             "goatstore",
     aliases:          ["gs", "store", "cmdstore"],
-    version:          "1.0.0",
+    version:          "1.1.0",
     author:           "Hridoy Hossen",
     countDown:        3,
     role:             0,
@@ -751,6 +973,8 @@ module.exports = {
         "{pn} trending — Top trending\n" +
         "{pn} upload <file> — Upload\n" +
         "{pn} upload event <file> — Upload event\n" +
+        "{pn} update <file> — Overwrite existing (same name+author, new version)\n" +
+        "{pn} update event <file> — Overwrite existing event\n" +
         "{pn} rawlink <id> — Get Pastebin raw link\n" +
         "{pn} delete <id> — Admin delete\n" +
         "{pn} sync — Manual sync",
@@ -759,6 +983,9 @@ module.exports = {
   },
 
   onLoad: function () {
+
+    if (global.__goatstoreStarted) return;
+    global.__goatstoreStarted = true;
 
     setTimeout(() => {
       maybeAutoUpdate(null, null).catch(() => {});
@@ -776,7 +1003,9 @@ module.exports = {
   },
 
   onReply: async function ({ api, event, Reply }) {
-    const { threadID, body, senderID } = event;
+    const { threadID, senderID } = event;
+    const body = String(event.body || "");
+    if (!isAllowed(senderID)) return;
 
     const delMatch = body.match(/^delete\s+(\S+)/i);
     if (delMatch) {
@@ -791,7 +1020,7 @@ module.exports = {
       }
     }
 
-    const { mode, query, category, page, totalPages, limit, senderID: origSender } = Reply;
+    const { mode, query, category, kind = "", author = "", page, totalPages, limit, senderID: origSender } = Reply;
     if (String(senderID) !== String(origSender)) return;
 
     const match = body.match(/^page\s+(\d+)$/i);
@@ -805,12 +1034,14 @@ module.exports = {
     if (mode === "list")
       await sendListPage(api, threadID, senderID, category, newPage, limit, prefix);
     else
-      await sendSearchPage(api, threadID, senderID, query, category, newPage, limit, prefix);
+      await sendSearchPage(api, threadID, senderID, query, category, newPage, limit, prefix, kind, author);
   },
 
   onReaction: async function ({ api, event, Reaction }) {
     const { threadID, userID } = event;
-    const { mode, query, category, page, totalPages, limit, senderID, messageID, editCount = 0 } = Reaction;
+    if (!isAllowed(userID)) return;
+
+    const { mode, query, category, kind = "", author = "", page, totalPages, limit, senderID, messageID, editCount = 0 } = Reaction;
     if (String(userID) !== String(senderID)) return;
     if (page >= totalPages)
       return api.sendMessage("✅ Already on the last page.", threadID);
@@ -819,18 +1050,18 @@ module.exports = {
     try {
       const rendered = mode === "list"
         ? await renderListInto(category, nextPage, limit)
-        : await renderSearchInto(query, category, nextPage, limit);
+        : await renderSearchInto(query, category, nextPage, limit, kind, author);
 
       if (!rendered) return api.sendMessage("❌ No results for this page.", threadID);
 
       if (editCount >= CONFIG.MAX_EDITS_PER_MESSAGE) {
         const sent = await api.sendMessage(rendered.text, threadID);
-        const h = { commandName: "goatstore", messageID: sent.messageID, mode, query, category, page: nextPage, totalPages: rendered.totalPages, limit, senderID, editCount: 0 };
+        const h = { commandName: "goatstore", messageID: sent.messageID, mode, query, category, kind, author, page: nextPage, totalPages: rendered.totalPages, limit, senderID, editCount: 0 };
         global.GoatBot.onReply.set(sent.messageID, h);
         global.GoatBot.onReaction.set(sent.messageID, h);
       } else {
         await api.editMessage(rendered.text, messageID);
-        const h = { commandName: "goatstore", messageID, mode, query, category, page: nextPage, totalPages: rendered.totalPages, limit, senderID, editCount: editCount + 1 };
+        const h = { commandName: "goatstore", messageID, mode, query, category, kind, author, page: nextPage, totalPages: rendered.totalPages, limit, senderID, editCount: editCount + 1 };
         global.GoatBot.onReply.set(messageID, h);
         global.GoatBot.onReaction.set(messageID, h);
       }
@@ -840,12 +1071,15 @@ module.exports = {
       if (mode === "list")
         await sendListPage(api, threadID, senderID, category, nextPage, limit, prefix);
       else
-        await sendSearchPage(api, threadID, senderID, query, category, nextPage, limit, prefix);
+        await sendSearchPage(api, threadID, senderID, query, category, nextPage, limit, prefix, kind, author);
     }
   },
 
   onStart: async function ({ api, event, args, threadData }) {
     const { threadID, senderID } = event;
+
+    if (!isAllowed(senderID))
+      return api.sendMessage("❌ You are not allowed to use this command.", threadID, event.messageID);
 
     const prefix = getPrefix(threadData || event?.threadData);
     const sub    = args[0]?.toLowerCase() || null;
@@ -878,8 +1112,18 @@ module.exports = {
     if (sub === "sync") {
       api.sendMessage("🔄 Starting manual sync...", threadID);
       try {
-        await runAutoSync();
-        api.sendMessage("✅ Sync complete.", threadID);
+        const r = await runAutoSync();
+        if (r.busy) return api.sendMessage("⏳ A sync is already running — try again in a moment.", threadID);
+        api.sendMessage(
+          `✅ Sync complete.\n` +
+          `╭─‣ New : ${r.uploaded}\n` +
+          `├‣ Updated : ${r.updated}\n` +
+          `├‣ Already in store : ${r.duplicates}\n` +
+          `├‣ Unchanged : ${r.unchanged}\n` +
+          `├‣ Errors : ${r.errors}\n` +
+          `╰────────────◊`,
+          threadID
+        );
       } catch (err) {
         api.sendMessage(`❌ Sync failed: ${err.message}`, threadID);
       }
@@ -904,7 +1148,7 @@ module.exports = {
       }
 
       const q = args.slice(1).join(" ");
-      return sendSearchPage(api, threadID, senderID, q, "", 1, 5, prefix);
+      return sendSearchPage(api, threadID, senderID, q, "", 1, 5, prefix, "event");
     }
 
     if (sub === "install") {
@@ -969,6 +1213,32 @@ module.exports = {
       return doUpload(api, threadID, filePath, kind);
     }
 
+    if (sub === "update") {
+      const isEvent = args[1]?.toLowerCase() === "event";
+      const fileName = isEvent ? args[2] : args[1];
+      const kind     = isEvent ? "event" : "command";
+      if (!fileName)
+        return api.sendMessage(
+          `📁 Usage:\n• ${prefix}gs update <fileName>\n• ${prefix}gs update event <fileName>\n` +
+          `💡 Same name + author, different (bumped) version in the file = old version deleted, new one installed.`,
+          threadID
+        );
+
+      const cwd = process.cwd();
+      const stdCmds   = path.join(cwd, "scripts", "cmds");
+      const stdEvents = path.join(cwd, "scripts", "events");
+      const dirs = kind === "event"
+        ? [getEventsDir(), stdEvents, path.join(cwd, "events")]
+        : [getCmdsDir(), stdCmds, getEventsDir(), stdEvents, cwd];
+      let filePath = null;
+      for (const dir of dirs) {
+        if (fs.existsSync(path.join(dir, fileName)))           { filePath = path.join(dir, fileName); break; }
+        if (fs.existsSync(path.join(dir, fileName + ".js")))   { filePath = path.join(dir, fileName + ".js"); break; }
+      }
+      if (!filePath) return api.sendMessage(`❌ File not found: "${fileName}"`, threadID);
+      return doUpdate(api, threadID, filePath, kind, prefix);
+    }
+
     if (sub === "rawlink" || sub === "raw") {
       const id = args[1];
       if (!id) return api.sendMessage(`❌ Usage: ${prefix}gs rawlink <id>`, threadID);
@@ -979,7 +1249,7 @@ module.exports = {
         const cmd = await apiGetOne(id);
         if (!cmd) {
           api.unsendMessage(loadMsg.messageID).catch(() => {});
-          return api.sendMessage("❌ Command not found.", threadID);
+          return api.sendMessage(`❌ Command not found for ID: ${id}`, threadID);
         }
 
         if (cmd.pastebin_url) {
@@ -998,20 +1268,17 @@ module.exports = {
           return api.sendMessage("❌ This command has no code stored.", threadID);
         }
 
-        const rawUrl = await uploadToPastebin(cmd.code, cmd.name || `gs_${id}`);
+        const rawUrl = await getRawLink(cmd);
 
         if (!rawUrl) {
           api.unsendMessage(loadMsg.messageID).catch(() => {});
           return api.sendMessage(
-            `❌ Pastebin upload failed.\n` +
-            `╭─‣ Check API key in CONFIG.PASTEBIN_API_KEY\n` +
+            `❌ Could not create a raw link right now.\n` +
+            `╭─‣ The store server or Pastebin refused the request — try again shortly.\n` +
             `╰────────────◊`,
             threadID
           );
         }
-
-        const cmdMongoId = cmd._id || cmd.id;
-        await apiSetPastebin(cmdMongoId, rawUrl);
 
         api.unsendMessage(loadMsg.messageID).catch(() => {});
         return api.sendMessage(
@@ -1025,7 +1292,7 @@ module.exports = {
         );
       } catch (err) {
         api.unsendMessage(loadMsg.messageID).catch(() => {});
-        return api.sendMessage(`❌ Error: ${err.message}`, threadID);
+        return api.sendMessage(`❌ Error: ${err.message}${err.status ? ` (HTTP ${err.status})` : ""}`, threadID);
       }
     }
 
@@ -1045,7 +1312,13 @@ module.exports = {
     if (sub === "author") {
       const authorName = args.slice(1).join(" ");
       if (!authorName) return api.sendMessage(`❌ Usage: ${prefix}gs author <name>`, threadID);
-      return sendSearchPage(api, threadID, senderID, authorName, "", 1, 5, prefix);
+      return sendSearchPage(api, threadID, senderID, "", "", 1, 5, prefix, "", authorName);
+    }
+
+    if (sub === "search" || sub === "find") {
+      const q = args.slice(1).join(" ").trim();
+      if (!q) return api.sendMessage(`❌ Usage: ${prefix}gs search <name / author / id>`, threadID);
+      return sendSearchPage(api, threadID, senderID, q, "", 1, 5, prefix);
     }
 
     if (sub === "cat" || sub === "category") {
@@ -1080,16 +1353,15 @@ module.exports = {
     if (looksLikeId) {
       try {
         const cmd = await apiGetOne(query.replace(/^#/, ""));
-        if (!cmd) return api.sendMessage("❌ Command not found.", threadID);
+        if (!cmd) return api.sendMessage(`❌ Command not found for ID: ${query}`, threadID);
         const cmdMongoId = cmd._id || cmd.id;
 
         let rawLine;
         if (cmd.pastebin_url) {
           rawLine = `🔗 Raw: ${cmd.pastebin_url}`;
         } else if (cmd.code) {
-          const rawUrl = await uploadToPastebin(cmd.code, cmd.name || `gs_${cmdMongoId}`);
+          const rawUrl = await getRawLink(cmd);
           if (rawUrl) {
-            apiSetPastebin(cmdMongoId, rawUrl).catch(() => {});
             rawLine = `🔗 Raw: ${rawUrl}`;
           } else {
             rawLine = `⚠️ Raw link couldn't be generated right now — try ${prefix}gs rawlink ${displayId(cmd)} again shortly.`;
@@ -1111,7 +1383,12 @@ module.exports = {
           `📅 Added: ${new Date(cmd.createdAt || Date.now()).toDateString()}\n` +
           rawLine;
         return api.sendMessage(msg.trim(), threadID);
-      } catch (_) { return api.sendMessage("❌ Details fetch error.", threadID); }
+      } catch (err) {
+        return api.sendMessage(
+          `❌ Details fetch error.\n╭─‣ ID : ${query}\n├‣ Reason : ${err.message}${err.status ? ` (HTTP ${err.status})` : ""}\n╰────────────◊`,
+          threadID
+        );
+      }
     }
 
     return sendSearchPage(api, threadID, senderID, query, "", 1, 5, prefix);
