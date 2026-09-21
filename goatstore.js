@@ -156,7 +156,12 @@ function adminHeaders() {
   };
 }
 
+// The backend accepts EITHER the short sequential number (seq: 1, 2, 3...)
+// OR the long Mongo _id for every command/event lookup, install, delete,
+// like and rawlink call. The short number is what users can actually type
+// reliably, so show that everywhere instead of the long hex _id.
 function displayId(cmd) {
+  if (cmd?.seq != null) return String(cmd.seq);
   return cmd?._id || cmd?.id || "N/A";
 }
 
@@ -554,107 +559,6 @@ async function doUpload(api, threadID, filePath, kind = "command") {
   }
 }
 
-async function doUpdate(api, threadID, filePath, kind = "command", prefix = "!") {
-  let code;
-  try { code = fs.readFileSync(filePath, "utf8"); }
-  catch (err) { return api.sendMessage(`❌ Read failed:\n${err.message}`, threadID); }
-
-  try { new Function(code); }
-  catch (err) { return api.sendMessage(`❌ Syntax Error:\n${err.message}`, threadID); }
-
-  const { name, author, description, category, version } = extractMeta(code, path.basename(filePath, ".js"), true);
-
-  let pid;
-  try { pid = await animateUpload(api, threadID, `${name} (update)`); } catch (_) {}
-
-  try {
-    const matches = await apiSearch(name, "", 0, kind).catch(() => []);
-    const existing = matches.find(c =>
-      String(c.name || "").trim().toLowerCase() === String(name).trim().toLowerCase() &&
-      String(c.author || "").trim().toLowerCase() === String(author).trim().toLowerCase()
-    );
-
-    if (!existing) {
-      if (pid) api.unsendMessage(pid).catch(() => {});
-      return api.sendMessage(
-        `❌ No existing "${name}" by ${author} found in the store.\n` +
-        `💡 Use ${prefix}gs upload instead to add it as a new entry.`,
-        threadID
-      );
-    }
-
-    const oldId      = existing._id || existing.id;
-    const oldVersion = existing.version || "0.0.0";
-
-    if (cmpVer(version, oldVersion) === 0) {
-      if (pid) api.unsendMessage(pid).catch(() => {});
-      return api.sendMessage(
-        `⚠️ Same Version!\n` +
-        `╭─‣ Name : ${name}\n` +
-        `├‣ Current : v${oldVersion}\n` +
-        `╰────────────◊\n` +
-        `💡 Bump the version number in your file before updating.`,
-        threadID
-      );
-    }
-
-    try {
-      await apiDelete(oldId);
-    } catch (err) {
-      if (pid) api.unsendMessage(pid).catch(() => {});
-      const e = err.response?.data?.error || err.message;
-      return api.sendMessage(
-        `❌ Failed to remove old version (ID: ${oldId}):\n${e}`,
-        threadID
-      );
-    }
-
-    const result = await apiUpload({ name, category, description, author, code, kind, version });
-
-    if (result.error) {
-      if (pid) api.unsendMessage(pid).catch(() => {});
-      return api.sendMessage(
-        `⚠️ Update Failed After Delete!\n` +
-        `╭─‣ Name : ${name}\n` +
-        `├‣ Error : ${result.error}\n` +
-        `├‣ Note : Old ID (${oldId}) was already removed — please re-upload manually.\n` +
-        `╰────────────◊`,
-        threadID
-      );
-    }
-
-    const newId = result._id || result.id;
-    let rawUrl  = result.pastebin_url || null;
-    if (!rawUrl && newId && code) rawUrl = await getRawLink({ ...result, code });
-
-    const msg =
-      `♻️ Command Updated (Overwritten)!\n` +
-      `╭─‣ Name : ${name}\n` +
-      `├‣ Category : ${catBadge({ category })}\n` +
-      `├‣ Author : ${author}\n` +
-      `├‣ Old Version : v${oldVersion}\n` +
-      `├‣ New Version : v${version}\n` +
-      `├‣ Old ID : ${oldId}\n` +
-      `├‣ New ID : ${newId || "N/A"}\n` +
-      (rawUrl ? `├‣ Raw Link : ${rawUrl}\n` : "") +
-      `╰────────────◊\n` +
-      `📅 Updated: ${new Date().toDateString()}`;
-
-    if (pid) {
-      try { await api.editMessage(msg, pid); }
-      catch (_) { api.sendMessage(msg, threadID); }
-    } else {
-      api.sendMessage(msg, threadID);
-    }
-  } catch (err) {
-    if (pid) api.unsendMessage(pid).catch(() => {});
-    api.sendMessage(
-      `❌ Update API Call Failed!\n├‣ Error : ${err.message || "Unknown error"}\n╰────────────◊\n💡 Check network or store backend.`,
-      threadID
-    );
-  }
-}
-
 async function checkSelfUpdate() {
   const now = Date.now();
   if (_updateCheckCache && (now - _updateCheckCache.checkedAt) < CONFIG.UPDATE_CHECK_INTERVAL)
@@ -936,8 +840,7 @@ function buildMenu(prefix) {
     `• ${p} trending     — Top trending\n` +
     `• ${p} upload <file>       — Upload command\n` +
     `• ${p} upload event <file> — Upload event\n` +
-    `• ${p} update <file>       — Overwrite existing (same name+author, new version)\n` +
-    `• ${p} update event <file> — Overwrite existing event\n` +
+    `• ${p} update <file>       — Same as upload; overwrites in place if name+author already exist with a new version\n` +
     `• ${p} rawlink <id> — Get raw Pastebin link\n` +
     `• ${p} delete <id>  — Delete (admin)\n` +
     `• ${p} sync         — Manual sync\n` +
@@ -973,8 +876,7 @@ module.exports = {
         "{pn} trending — Top trending\n" +
         "{pn} upload <file> — Upload\n" +
         "{pn} upload event <file> — Upload event\n" +
-        "{pn} update <file> — Overwrite existing (same name+author, new version)\n" +
-        "{pn} update event <file> — Overwrite existing event\n" +
+        "{pn} update <file> — Same as upload; overwrites in place on a version bump\n" +
         "{pn} rawlink <id> — Get Pastebin raw link\n" +
         "{pn} delete <id> — Admin delete\n" +
         "{pn} sync — Manual sync",
@@ -1188,13 +1090,14 @@ module.exports = {
       } catch (_) { return api.sendMessage("❌ Trending API error.", threadID); }
     }
 
-    if (sub === "upload") {
+    if (sub === "upload" || sub === "update") {
       const isEvent = args[1]?.toLowerCase() === "event";
       const fileName = isEvent ? args[2] : args[1];
       const kind     = isEvent ? "event" : "command";
       if (!fileName)
         return api.sendMessage(
-          `📁 Usage:\n• ${prefix}gs upload <fileName>\n• ${prefix}gs upload event <fileName>`,
+          `📁 Usage:\n• ${prefix}gs ${sub} <fileName>\n• ${prefix}gs ${sub} event <fileName>\n` +
+          `💡 Same name + author already in the store, but a different (bumped) version in the file = the existing entry is overwritten in place (same ID, likes kept). Same version = blocked as a duplicate.`,
           threadID
         );
 
@@ -1211,32 +1114,6 @@ module.exports = {
       }
       if (!filePath) return api.sendMessage(`❌ File not found: "${fileName}"`, threadID);
       return doUpload(api, threadID, filePath, kind);
-    }
-
-    if (sub === "update") {
-      const isEvent = args[1]?.toLowerCase() === "event";
-      const fileName = isEvent ? args[2] : args[1];
-      const kind     = isEvent ? "event" : "command";
-      if (!fileName)
-        return api.sendMessage(
-          `📁 Usage:\n• ${prefix}gs update <fileName>\n• ${prefix}gs update event <fileName>\n` +
-          `💡 Same name + author, different (bumped) version in the file = old version deleted, new one installed.`,
-          threadID
-        );
-
-      const cwd = process.cwd();
-      const stdCmds   = path.join(cwd, "scripts", "cmds");
-      const stdEvents = path.join(cwd, "scripts", "events");
-      const dirs = kind === "event"
-        ? [getEventsDir(), stdEvents, path.join(cwd, "events")]
-        : [getCmdsDir(), stdCmds, getEventsDir(), stdEvents, cwd];
-      let filePath = null;
-      for (const dir of dirs) {
-        if (fs.existsSync(path.join(dir, fileName)))           { filePath = path.join(dir, fileName); break; }
-        if (fs.existsSync(path.join(dir, fileName + ".js")))   { filePath = path.join(dir, fileName + ".js"); break; }
-      }
-      if (!filePath) return api.sendMessage(`❌ File not found: "${fileName}"`, threadID);
-      return doUpdate(api, threadID, filePath, kind, prefix);
     }
 
     if (sub === "rawlink" || sub === "raw") {
