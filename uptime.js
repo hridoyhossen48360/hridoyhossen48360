@@ -9,20 +9,8 @@ const CACHE_PATH = path.join(__dirname, "cache");
 const STATS_FILE = path.join(CACHE_PATH, "stats.json");
 
 // ─────────────────────────────────────────────
-// Helpers
+// Data helpers (unchanged logic from v6)
 // ─────────────────────────────────────────────
-function roundRect(ctx, x, y, w, h, r) {
-  if (w < 2 * r) r = w / 2;
-  if (h < 2 * r) r = h / 2;
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
 function formatUptime(s) {
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
@@ -33,8 +21,6 @@ function formatUptime(s) {
   return `${m}m ${sec}s`;
 }
 
-// Accurate CPU usage via delta-sampling (single-snapshot method is misleading —
-// os.cpus() returns cumulative time since boot, not "current" load).
 function cpuSnapshot() {
   return os.cpus().map((c) => {
     let total = 0;
@@ -91,9 +77,7 @@ function getDiskUsage() {
 
 function getProcessCount() {
   try {
-    if (os.platform() === "win32") {
-      return execSync("tasklist /NH").toString().trim().split("\n").length;
-    }
+    if (os.platform() === "win32") return execSync("tasklist /NH").toString().trim().split("\n").length;
     return execSync("ps -e --no-headers 2>/dev/null || ps -A").toString().trim().split("\n").length;
   } catch {
     return "N/A";
@@ -118,14 +102,14 @@ function testNetworkSpeed() {
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;
-    const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
     try {
       const req = https.get("https://www.google.com/favicon.ico", { timeout: 1800 }, (res) => {
         let bytes = 0;
         res.on("data", (d) => (bytes += d.length));
         res.on("end", () => {
           const dur = (Date.now() - start) / 1000;
-          finish(dur > 0 ? `${(bytes / 1024 / dur).toFixed(1)} KB/s` : "N/A");
+          finish(dur > 0 ? `${(bytes / 1024 / dur).toFixed(1)}KB/s` : "N/A");
         });
         res.on("error", () => finish("N/A"));
       });
@@ -138,90 +122,120 @@ function testNetworkSpeed() {
 }
 
 function loadStats() {
-  try {
-    return fs.readJsonSync(STATS_FILE);
-  } catch {
-    return { totalRuns: 0, history: [] };
-  }
+  try { return fs.readJsonSync(STATS_FILE); } catch { return { totalRuns: 0, history: [] }; }
 }
 function saveStats(stats) {
-  try {
-    fs.mkdirSync(CACHE_PATH, { recursive: true });
-    fs.writeJsonSync(STATS_FILE, stats);
-  } catch {}
+  try { fs.mkdirSync(CACHE_PATH, { recursive: true }); fs.writeJsonSync(STATS_FILE, stats); } catch {}
 }
 
-function barColor(pct) {
-  if (pct < 50) return ["#00ff9d", "#00cc7a", "rgba(0,255,157,0.15)"];
-  if (pct < 75) return ["#ffdd00", "#ff9900", "rgba(255,200,0,0.15)"];
-  return ["#ff4466", "#cc1133", "rgba(255,50,80,0.15)"];
+// ─────────────────────────────────────────────
+// Hacker-theme render helpers
+// ─────────────────────────────────────────────
+const GREEN = "#00ff41";
+const GREEN_DIM = "#0a3d0a";
+const GREEN_TEXT = "#c8ffc8";
+const AMBER = "#ffb000";
+const RED = "#ff003c";
+const CYAN_GLITCH = "rgba(0,255,255,0.35)";
+const RED_GLITCH = "rgba(255,0,60,0.4)";
+
+function hackColor(pct) {
+  if (pct < 50) return GREEN;
+  if (pct < 75) return AMBER;
+  return RED;
 }
 
-function glow(ctx, color, blur = 16) { ctx.shadowColor = color; ctx.shadowBlur = blur; }
+function glow(ctx, color, blur = 14) { ctx.shadowColor = color; ctx.shadowBlur = blur; }
 function noGlow(ctx) { ctx.shadowBlur = 0; }
 
-function drawProgressBar(ctx, x, y, w, h, pct, colors) {
-  ctx.fillStyle = "rgba(255,255,255,0.05)";
-  roundRect(ctx, x, y, w, h, h / 2); ctx.fill();
-
-  ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
-  roundRect(ctx, x, y, w, h, h / 2); ctx.stroke();
-
-  const fw = Math.max((pct / 100) * w, h);
-  const g = ctx.createLinearGradient(x, 0, x + fw, 0);
-  g.addColorStop(0, colors[0]);
-  g.addColorStop(1, colors[1]);
-  glow(ctx, colors[0], 10);
-  ctx.fillStyle = g;
-  roundRect(ctx, x, y, fw, h, h / 2); ctx.fill();
+function glitchText(ctx, text, x, y, font, align = "left", mainColor = GREEN_TEXT) {
+  ctx.font = font; ctx.textAlign = align;
+  ctx.fillStyle = RED_GLITCH; ctx.fillText(text, x - 2, y);
+  ctx.fillStyle = CYAN_GLITCH; ctx.fillText(text, x + 2, y);
+  glow(ctx, GREEN, 16);
+  ctx.fillStyle = mainColor; ctx.fillText(text, x, y);
   noGlow(ctx);
-
-  ctx.fillStyle = "rgba(255,255,255,0.1)";
-  roundRect(ctx, x + 2, y + 2, fw - 4, h / 2 - 2, h / 2); ctx.fill();
-
-  ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1;
-  for (let i = 1; i < 10; i++) {
-    const tx = x + (w / 10) * i;
-    if (tx < x + fw) {
-      ctx.beginPath(); ctx.moveTo(tx, y + 2); ctx.lineTo(tx, y + h - 2); ctx.stroke();
-    }
-  }
 }
 
-function drawCard(ctx, x, y, w, h, r = 14, alpha = 0.75) {
-  ctx.fillStyle = `rgba(6, 12, 26, ${alpha})`;
-  roundRect(ctx, x, y, w, h, r); ctx.fill();
-  const border = ctx.createLinearGradient(x, y, x + w, y + h);
-  border.addColorStop(0, "rgba(0,229,255,0.25)");
-  border.addColorStop(1, "rgba(0,100,255,0.10)");
-  ctx.strokeStyle = border; ctx.lineWidth = 1.2;
-  roundRect(ctx, x, y, w, h, r); ctx.stroke();
-}
-
-function drawAccent(ctx, x, y, h, color = "#00e5ff") {
-  const g = ctx.createLinearGradient(0, y, 0, y + h);
-  g.addColorStop(0, color);
-  g.addColorStop(0.5, color);
-  g.addColorStop(1, "transparent");
-  ctx.fillStyle = g;
-  roundRect(ctx, x, y, 4, h, 2); ctx.fill();
-}
-
-function glowText(ctx, text, x, y, color, font, blur = 14, align = "left") {
+function plainGlow(ctx, text, x, y, color, font, blur = 10, align = "left") {
   ctx.font = font; ctx.textAlign = align;
   glow(ctx, color, blur);
   ctx.fillStyle = color; ctx.fillText(text, x, y);
   noGlow(ctx);
 }
 
-function hexToRgb(hex) {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `${r},${g},${b}`;
+// Matrix digital-rain texture (static snapshot of falling-code streams)
+function drawMatrixRain(ctx, W, H, seedDensity = 0.22) {
+  const chars = "アイウエオカキクケコサシスセソ01アカサタナ0123456789$#%&";
+  const fontSize = 14;
+  const cols = Math.floor(W / fontSize);
+  ctx.font = `${fontSize}px monospace`;
+  ctx.textAlign = "left";
+  for (let c = 0; c < cols; c++) {
+    if (Math.random() > seedDensity) continue;
+    const x = c * fontSize;
+    const streamLen = 5 + Math.floor(Math.random() * 12);
+    const startY = Math.random() * H;
+    for (let i = 0; i < streamLen; i++) {
+      const y = (startY + i * fontSize) % H;
+      const alpha = Math.max(0, 1 - i / streamLen);
+      ctx.fillStyle = i === 0 ? "rgba(210,255,210,0.85)" : `rgba(0,255,65,${alpha * 0.35})`;
+      ctx.fillText(chars[Math.floor(Math.random() * chars.length)], x, y);
+    }
+  }
 }
 
-// Per-core mini equalizer bars
+function drawScanlines(ctx, W, H) {
+  ctx.fillStyle = "rgba(0,0,0,0.12)";
+  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+}
+
+function drawVignette(ctx, W, H) {
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.85);
+  v.addColorStop(0, "rgba(0,0,0,0)");
+  v.addColorStop(1, "rgba(0,0,0,0.55)");
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+// Sharp terminal box with corner ticks (no rounded corners — hacker HUD look)
+function drawTermBox(ctx, x, y, w, h, accent = GREEN, alpha = 0.78) {
+  ctx.fillStyle = `rgba(0,8,0,${alpha})`;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = `rgba(0,255,65,0.25)`; ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  const t = 9;
+  ctx.strokeStyle = accent; ctx.lineWidth = 1.5;
+  glow(ctx, accent, 6);
+  ctx.beginPath();
+  ctx.moveTo(x, y + t); ctx.lineTo(x, y); ctx.lineTo(x + t, y);
+  ctx.moveTo(x + w - t, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + t);
+  ctx.moveTo(x + w, y + h - t); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w - t, y + h);
+  ctx.moveTo(x + t, y + h); ctx.lineTo(x, y + h); ctx.lineTo(x, y + h - t);
+  ctx.stroke();
+  noGlow(ctx);
+}
+
+// Segmented ASCII-style bar: [████████░░░░░░░░]
+function drawSegBar(ctx, x, y, w, h, pct, color) {
+  const segs = 34, gap = 2;
+  const segW = (w - gap * (segs - 1)) / segs;
+  const filled = Math.round((pct / 100) * segs);
+  for (let i = 0; i < segs; i++) {
+    const sx = x + i * (segW + gap);
+    if (i < filled) {
+      glow(ctx, color, 5);
+      ctx.fillStyle = color;
+      ctx.fillRect(sx, y, segW, h);
+      noGlow(ctx);
+    } else {
+      ctx.strokeStyle = "rgba(0,255,65,0.18)"; ctx.lineWidth = 1;
+      ctx.strokeRect(sx, y, segW, h);
+    }
+  }
+}
+
+// Per-core vertical bar cluster
 function drawCoreBars(ctx, x, y, w, h, cores) {
   const maxShow = 8;
   let show = cores.slice(0, maxShow);
@@ -234,26 +248,24 @@ function drawCoreBars(ctx, x, y, w, h, cores) {
   show.forEach((pct, i) => {
     const bx = x + i * (bw + gap);
     const bh = Math.max((pct / 100) * h, 3);
-    const [c1, c2] = barColor(pct);
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    roundRect(ctx, bx, y, bw, h, 4); ctx.fill();
-    const g = ctx.createLinearGradient(0, y + h, 0, y + h - bh);
-    g.addColorStop(0, c2); g.addColorStop(1, c1);
-    ctx.fillStyle = g;
-    roundRect(ctx, bx, y + h - bh, bw, bh, 4); ctx.fill();
-    ctx.fillStyle = "rgba(200,230,255,0.6)"; ctx.font = "9px Arial"; ctx.textAlign = "center";
+    const color = hackColor(pct);
+    ctx.strokeStyle = "rgba(0,255,65,0.15)"; ctx.lineWidth = 1;
+    ctx.strokeRect(bx, y, bw, h);
+    glow(ctx, color, 6);
+    ctx.fillStyle = color;
+    ctx.fillRect(bx, y + h - bh, bw, bh);
+    noGlow(ctx);
+    ctx.fillStyle = "rgba(0,255,65,0.6)"; ctx.font = "9px monospace"; ctx.textAlign = "center";
     ctx.fillText(i < maxShow ? `C${i + 1}` : "AVG", bx + bw / 2, y + h + 12);
   });
 }
 
-// CPU/RAM trend sparkline built from persisted run history
 function drawSparkline(ctx, x, y, w, h, history) {
-  ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(0,255,65,0.15)"; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h); ctx.stroke();
-
   if (!history || history.length < 2) {
-    ctx.fillStyle = "rgba(180,220,255,0.4)"; ctx.font = "11px Arial"; ctx.textAlign = "left";
-    ctx.fillText("Collecting trend data...", x, y + h / 2);
+    ctx.fillStyle = "rgba(0,255,65,0.5)"; ctx.font = "11px monospace"; ctx.textAlign = "left";
+    ctx.fillText("> awaiting sufficient trend data...", x, y + h / 2);
     return;
   }
   const pts = history.slice(-15);
@@ -265,13 +277,10 @@ function drawSparkline(ctx, x, y, w, h, history) {
       const py = y + h - (p[key] / 100) * h;
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
-    glow(ctx, color, 6);
-    ctx.strokeStyle = color; ctx.lineWidth = 2;
-    ctx.stroke();
-    noGlow(ctx);
+    glow(ctx, color, 6); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); noGlow(ctx);
   };
-  drawLine("ram", "#00aaff");
-  drawLine("cpu", "#ff9d00");
+  drawLine("ram", GREEN);
+  drawLine("cpu", RED);
 }
 
 // ─────────────────────────────────────────────
@@ -280,11 +289,12 @@ function drawSparkline(ctx, x, y, w, h, history) {
 module.exports = {
   config: {
     name: "uptime",
-    version: "6.0",
+    aliases: ["up", "status", "upt", "sys", "hack"],
+    version: "7.0-HACKER",
     author: "HR ID OY",
     countDown: 5,
     role: 0,
-    shortDescription: "⚡ Ultra Advanced Live System Dashboard",
+    shortDescription: "💀 Hacker-Terminal Live System Monitor",
     category: "System",
     guide: "{pn}",
     dependencies: { canvas: "", "fs-extra": "" },
@@ -292,9 +302,7 @@ module.exports = {
 
   onStart: async function ({ api, event, message }) {
     const t0 = Date.now();
-
     try {
-      // ── Live system stats ──
       const totalMem = os.totalmem();
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
@@ -303,7 +311,6 @@ module.exports = {
       const ramFree = (freeMem / 1073741824).toFixed(2);
       const ramTotal = (totalMem / 1073741824).toFixed(2);
 
-      // Accurate delta-sampled CPU usage (also gives per-core numbers)
       const perCore = await sampleCpuUsage(220);
       const cpuPct = Math.round(perCore.reduce((a, b) => a + b, 0) / perCore.length);
       const cpuModel = os.cpus()[0].model.split("@")[0].trim().substring(0, 26);
@@ -320,11 +327,8 @@ module.exports = {
       const sysUp = formatUptime(os.uptime());
       const processCount = getProcessCount();
       const gpuInfo = getGpuInfo();
-
-      // Disk (cross-platform)
       const disk = getDiskUsage();
 
-      // Network interfaces + live speed test (bounded by timeout, never blocks long)
       let netIfaces = 0;
       try {
         for (const k in os.networkInterfaces())
@@ -332,189 +336,153 @@ module.exports = {
       } catch {}
       const netSpeed = await testNetworkSpeed();
 
-      // Ping
       const ping = Date.now() - t0;
-      const pingColor = ping < 80 ? "#00ff9d" : ping < 200 ? "#aaff00" : ping < 500 ? "#ffdd00" : "#ff4466";
-      const pingStatus = ping < 80 ? "PERFECT" : ping < 200 ? "EXCELLENT" : ping < 500 ? "GOOD" : "POOR";
+      const pingColor = hackColor(ping < 80 ? 10 : ping < 200 ? 40 : ping < 500 ? 60 : 90);
+      const pingStatus = ping < 80 ? "OPTIMAL" : ping < 200 ? "STABLE" : ping < 500 ? "LAGGING" : "CRITICAL";
 
-      // Persistent usage stats (total runs + CPU/RAM history for the sparkline)
       const stats = loadStats();
       stats.totalRuns = (stats.totalRuns || 0) + 1;
       stats.history = [...(stats.history || []), { cpu: cpuPct, ram: ramPct }].slice(-15);
       saveStats(stats);
 
-      // User
-      let userName = "User", userID = event.senderID;
+      let userName = "UNKNOWN", userID = event.senderID;
       try {
         const info = await api.getUserInfo(userID);
-        userName = info[userID]?.name || "User";
-        if (userName.length > 16) userName = userName.substring(0, 15) + "…";
+        userName = (info[userID]?.name || "UNKNOWN").toUpperCase();
+        if (userName.length > 18) userName = userName.substring(0, 17) + "…";
       } catch {}
 
-      // Time
       const now = new Date();
-      const dateStr = now.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+      const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
       const timeStr = now.toLocaleTimeString("en-GB", { hour12: false });
       const sessionID = Date.now().toString(16).toUpperCase().substring(0, 10);
 
-      // ── Canvas 1080 x 740 ──
       const W = 1080, H = 740;
       const cv = createCanvas(W, H);
       const ctx = cv.getContext("2d");
 
+      // Base black background
       const bg = ctx.createLinearGradient(0, 0, W, H);
-      bg.addColorStop(0, "#020812");
-      bg.addColorStop(0.4, "#050d1e");
-      bg.addColorStop(0.7, "#040b1a");
-      bg.addColorStop(1, "#030910");
+      bg.addColorStop(0, "#000000");
+      bg.addColorStop(0.5, "#000f02");
+      bg.addColorStop(1, "#000000");
       ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
-      const amb1 = ctx.createRadialGradient(160, 320, 0, 160, 320, 320);
-      amb1.addColorStop(0, "rgba(0,150,255,0.06)");
-      amb1.addColorStop(1, "transparent");
-      ctx.fillStyle = amb1; ctx.fillRect(0, 0, W, H);
+      // Matrix rain texture (behind everything)
+      drawMatrixRain(ctx, W, H, 0.16);
 
-      const amb2 = ctx.createRadialGradient(W - 200, 200, 0, W - 200, 200, 400);
-      amb2.addColorStop(0, "rgba(0,229,255,0.04)");
-      amb2.addColorStop(1, "transparent");
-      ctx.fillStyle = amb2; ctx.fillRect(0, 0, W, H);
-
-      ctx.strokeStyle = "rgba(0,180,255,0.035)"; ctx.lineWidth = 1;
+      // Faint grid
+      ctx.strokeStyle = "rgba(0,255,65,0.03)"; ctx.lineWidth = 1;
       for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
       for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
 
-      ctx.strokeStyle = "rgba(0,229,255,0.015)"; ctx.lineWidth = 1;
-      for (let i = -H; i < W; i += 30) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + H, H); ctx.stroke(); }
-
-      glow(ctx, "#00e5ff", 30);
-      ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 2;
-      roundRect(ctx, 8, 8, W - 16, H - 16, 22); ctx.stroke();
+      // Outer frame
+      glow(ctx, GREEN, 26);
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 2;
+      ctx.strokeRect(9, 9, W - 18, H - 18);
       noGlow(ctx);
+      ctx.strokeStyle = "rgba(0,255,65,0.15)"; ctx.lineWidth = 1;
+      ctx.strokeRect(15, 15, W - 30, H - 30);
 
-      ctx.strokeStyle = "rgba(0,229,255,0.12)"; ctx.lineWidth = 1;
-      roundRect(ctx, 14, 14, W - 28, H - 28, 18); ctx.stroke();
-
-      const cDef = [[14, 14, 1, 1], [W - 14, 14, -1, 1], [14, H - 14, 1, -1], [W - 14, H - 14, -1, -1]];
-      ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 3;
-      glow(ctx, "#00e5ff", 12);
+      // Corner ticks
+      const cDef = [[15, 15, 1, 1], [W - 15, 15, -1, 1], [15, H - 15, 1, -1], [W - 15, H - 15, -1, -1]];
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 2.5;
+      glow(ctx, GREEN, 10);
       cDef.forEach(([cx, cy, sx, sy]) => {
-        ctx.beginPath(); ctx.moveTo(cx, cy + sy * 36); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * 36, cy); ctx.stroke();
-        ctx.save(); ctx.translate(cx + sx * 50, cy + sy * 50);
-        ctx.rotate(Math.PI / 4);
-        ctx.strokeRect(-4, -4, 8, 8);
-        ctx.restore();
+        ctx.beginPath(); ctx.moveTo(cx, cy + sy * 34); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * 34, cy); ctx.stroke();
       });
       noGlow(ctx);
 
+      // Boot-log strip along top
+      ctx.font = "10px monospace"; ctx.fillStyle = "rgba(0,255,65,0.55)"; ctx.textAlign = "left";
+      ctx.fillText(
+        `SYS_BOOT::OK  AUTH::VERIFIED  ENCRYPTION::AES-256  FIREWALL::ACTIVE  THREAT_LEVEL::${ramPct > 85 || cpuPct > 85 ? "ELEVATED" : "LOW"}`,
+        30, 34
+      );
+
       // ════════════════════════════════
-      // LEFT PANEL
+      // LEFT PANEL — user access card
       // ════════════════════════════════
       const LP = 20;
-      drawCard(ctx, LP, LP, 278, H - LP * 2, 18, 0.80);
+      drawTermBox(ctx, LP, LP + 20, 278, H - LP * 2 - 20, GREEN, 0.72);
 
-      const lpInner = ctx.createLinearGradient(LP, LP, LP, H - LP);
-      lpInner.addColorStop(0, "rgba(0,229,255,0.05)");
-      lpInner.addColorStop(0.5, "transparent");
-      lpInner.addColorStop(1, "rgba(0,100,255,0.03)");
-      ctx.fillStyle = lpInner;
-      roundRect(ctx, LP, LP, 278, H - LP * 2, 18); ctx.fill();
+      ctx.font = "10px monospace"; ctx.fillStyle = "rgba(0,255,65,0.7)"; ctx.textAlign = "left";
+      ctx.fillText("> USER_PROFILE.DAT", LP + 14, LP + 40);
 
-      const AX = LP + 139, AY = 128, AR = 72;
+      const AX = LP + 139, AY = 148, AR = 68;
       try {
         const avu = `https://graph.facebook.com/${userID}/picture?width=512&height=512&access_token=6628568379%7Cc1e620fa708a1d5696fb991c1bde5662`;
         const av = await loadImage(avu);
 
         for (let ring = 3; ring >= 1; ring--) {
-          ctx.strokeStyle = `rgba(0,229,255,${0.08 * ring})`;
+          ctx.strokeStyle = `rgba(0,255,65,${0.07 * ring})`;
           ctx.lineWidth = ring * 4;
           ctx.beginPath(); ctx.arc(AX, AY, AR + 8 + ring * 8, 0, Math.PI * 2); ctx.stroke();
         }
-
-        glow(ctx, "#00e5ff", 20);
-        ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 3;
+        glow(ctx, GREEN, 20);
+        ctx.strokeStyle = GREEN; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(AX, AY, AR + 4, 0, Math.PI * 2); ctx.stroke();
         noGlow(ctx);
 
         ctx.save();
         ctx.beginPath(); ctx.arc(AX, AY, AR, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
         ctx.drawImage(av, AX - AR, AY - AR, AR * 2, AR * 2);
+        // green duotone overlay for hacker feel
+        ctx.fillStyle = "rgba(0,255,65,0.16)";
+        ctx.fillRect(AX - AR, AY - AR, AR * 2, AR * 2);
         ctx.restore();
-
-        const shine = ctx.createRadialGradient(AX - AR * 0.3, AY - AR * 0.3, 0, AX, AY, AR);
-        shine.addColorStop(0, "rgba(255,255,255,0.15)");
-        shine.addColorStop(1, "transparent");
-        ctx.fillStyle = shine;
-        ctx.save(); ctx.beginPath(); ctx.arc(AX, AY, AR, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
-        ctx.fill(); ctx.restore();
       } catch {
-        // Fallback: initials avatar instead of a bare circle
-        const initials = (userName || "U").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
-        glow(ctx, "#00e5ff", 20);
-        ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 3;
+        const initials = (userName || "U").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("");
+        glow(ctx, GREEN, 20);
+        ctx.strokeStyle = GREEN; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(AX, AY, AR + 4, 0, Math.PI * 2); ctx.stroke();
         noGlow(ctx);
-        const fg = ctx.createLinearGradient(AX - AR, AY - AR, AX + AR, AY + AR);
-        fg.addColorStop(0, "rgba(0,229,255,0.25)");
-        fg.addColorStop(1, "rgba(0,100,255,0.15)");
-        ctx.fillStyle = fg;
+        ctx.fillStyle = "rgba(0,255,65,0.15)";
         ctx.beginPath(); ctx.arc(AX, AY, AR, 0, Math.PI * 2); ctx.fill();
-        glowText(ctx, initials || "?", AX, AY + 14, "#e0f7ff", "bold 40px Arial", 10, "center");
+        plainGlow(ctx, initials || "?", AX, AY + 12, GREEN_TEXT, "bold 34px monospace", 10, "center");
       }
 
-      glowText(ctx, userName, AX, AY + AR + 30, "#ffffff", "bold 20px Arial", 10, "center");
+      plainGlow(ctx, userName, AX, AY + AR + 28, GREEN_TEXT, "bold 17px monospace", 8, "center");
 
       ctx.textAlign = "center";
-      const roleBg = ctx.createLinearGradient(AX - 80, AY + AR + 36, AX + 80, AY + AR + 56);
-      roleBg.addColorStop(0, "rgba(0,229,255,0.12)");
-      roleBg.addColorStop(1, "rgba(0,100,255,0.08)");
-      ctx.fillStyle = roleBg;
-      roundRect(ctx, AX - 80, AY + AR + 36, 160, 22, 11); ctx.fill();
-      ctx.strokeStyle = "rgba(0,229,255,0.35)"; ctx.lineWidth = 1;
-      roundRect(ctx, AX - 80, AY + AR + 36, 160, 22, 11); ctx.stroke();
-      glowText(ctx, "◈  SYSTEM CONTROLLER  ◈", AX, AY + AR + 52, "#00e5ff", "bold 10px Arial", 8, "center");
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 1;
+      ctx.strokeRect(AX - 90, AY + AR + 34, 180, 22);
+      plainGlow(ctx, "[ ROOT ACCESS GRANTED ]", AX, AY + AR + 49, GREEN, "bold 10px monospace", 6, "center");
 
-      glow(ctx, "#00ff9d", 14);
-      ctx.fillStyle = "#00ff9d";
-      ctx.beginPath(); ctx.arc(AX - 52, AY + AR + 76, 5, 0, Math.PI * 2); ctx.fill();
+      glow(ctx, GREEN, 12);
+      ctx.fillStyle = GREEN;
+      ctx.beginPath(); ctx.arc(AX - 58, AY + AR + 72, 4, 0, Math.PI * 2); ctx.fill();
       noGlow(ctx);
-      ctx.fillStyle = "#ccffe8"; ctx.font = "12px Arial"; ctx.textAlign = "left";
-      ctx.fillText("ONLINE  •  ACTIVE", AX - 42, AY + AR + 81);
+      ctx.fillStyle = GREEN_TEXT; ctx.font = "11px monospace"; ctx.textAlign = "left";
+      ctx.fillText("CONNECTION::SECURE", AX - 48, AY + AR + 76);
 
       const miniStats = [
-        { icon: "🤖", label: "BOT UPTIME", value: botUp },
-        { icon: "🖥", label: "SYS UPTIME", value: sysUp },
-        { icon: "🟢", label: "NODE.JS", value: nodeVer },
-        { icon: "🌐", label: "HOSTNAME", value: hostname },
-        { icon: "📡", label: "NET IF", value: `${netIfaces} active` },
-        { icon: "📈", label: "TOTAL RUNS", value: `${stats.totalRuns}` },
+        { label: "BOT_UPTIME", value: botUp },
+        { label: "SYS_UPTIME", value: sysUp },
+        { label: "NODE_VER", value: nodeVer },
+        { label: "HOSTNAME", value: hostname },
+        { label: "NET_IF", value: `${netIfaces}` },
+        { label: "TOTAL_RUNS", value: `${stats.totalRuns}` },
       ];
-
-      let mY = AY + AR + 98;
+      let mY = AY + AR + 96;
       for (const ms of miniStats) {
-        ctx.fillStyle = "rgba(0,229,255,0.05)";
-        roundRect(ctx, LP + 12, mY, 254, 42, 9); ctx.fill();
-        ctx.strokeStyle = "rgba(0,229,255,0.1)"; ctx.lineWidth = 1;
-        roundRect(ctx, LP + 12, mY, 254, 42, 9); ctx.stroke();
-        drawAccent(ctx, LP + 12, mY, 42);
-
-        ctx.fillStyle = "#7df9ff"; ctx.font = "bold 10px Arial"; ctx.textAlign = "left";
-        ctx.fillText(`${ms.icon}  ${ms.label}`, LP + 24, mY + 16);
-        ctx.fillStyle = "#e0f7ff"; ctx.font = "bold 13px Arial"; ctx.textAlign = "right";
-        ctx.fillText(ms.value, LP + 258, mY + 34);
-        mY += 48;
+        ctx.strokeStyle = "rgba(0,255,65,0.18)"; ctx.lineWidth = 1;
+        ctx.strokeRect(LP + 12, mY, 254, 40);
+        ctx.fillStyle = "rgba(0,255,65,0.7)"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+        ctx.fillText(`> ${ms.label}`, LP + 22, mY + 16);
+        ctx.fillStyle = GREEN_TEXT; ctx.font = "bold 13px monospace"; ctx.textAlign = "right";
+        ctx.fillText(ms.value, LP + 258, mY + 32);
+        mY += 46;
       }
 
-      const devY = H - LP - 58;
-      ctx.fillStyle = "rgba(0,0,0,0.55)";
-      roundRect(ctx, LP + 12, devY, 254, 48, 12); ctx.fill();
-      glow(ctx, "#00e5ff", 8);
-      ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = 1.5;
-      roundRect(ctx, LP + 12, devY, 254, 48, 12); ctx.stroke();
+      const devY = H - LP - 56;
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 1.5;
+      glow(ctx, GREEN, 8);
+      ctx.strokeRect(LP + 12, devY, 254, 46);
       noGlow(ctx);
-
-      ctx.fillStyle = "rgba(0,229,255,0.6)"; ctx.font = "bold 10px Arial"; ctx.textAlign = "center";
-      ctx.fillText("DEVELOPER", AX, devY + 18);
-      glowText(ctx, "◆  HR ID OY  ◆", AX, devY + 38, "#00e5ff", "bold 17px Arial", 12, "center");
+      ctx.fillStyle = "rgba(0,255,65,0.6)"; ctx.font = "9px monospace"; ctx.textAlign = "center";
+      ctx.fillText("[ SYSTEM_AUTHOR ]", AX, devY + 17);
+      plainGlow(ctx, "HR_ID_OY", AX, devY + 36, GREEN, "bold 16px monospace", 10, "center");
 
       // ════════════════════════════════
       // RIGHT PANEL
@@ -522,143 +490,129 @@ module.exports = {
       const RX = 318;
       const RW = W - RX - LP;
 
-      glowText(ctx, "⬡  ULTRA LIVE PERFORMANCE MONITOR", RX, 50, "#00e5ff", "bold 21px Arial", 16);
+      glitchText(ctx, "root@sysmon:~# ./live_monitor.sh --scan", RX, 50, "bold 19px monospace");
+      ctx.fillStyle = "rgba(0,255,65,0.55)"; ctx.font = "11px monospace"; ctx.textAlign = "left";
+      ctx.fillText("[ ULTRA-ADVANCED INTRUSION-GRADE SYSTEM MONITOR ]", RX, 64);
 
-      ctx.strokeStyle = "rgba(0,229,255,0.25)"; ctx.lineWidth = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath(); ctx.moveTo(RX, 60); ctx.lineTo(W - LP, 60); ctx.stroke();
+      ctx.strokeStyle = "rgba(0,255,65,0.3)"; ctx.lineWidth = 1;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.moveTo(RX, 72); ctx.lineTo(W - LP, 72); ctx.stroke();
       ctx.setLineDash([]);
 
       const chips = [
-        { label: `🔑 SESSION: ${sessionID}`, color: "#00e5ff" },
-        { label: `📅 ${dateStr}`, color: "#aaff00" },
-        { label: `🕐 ${timeStr}`, color: "#ffdd00" },
+        `[SESSION::${sessionID}]`,
+        `[${dateStr}]`,
+        `[${timeStr}]`,
       ];
       let chipX = RX;
-      for (const chip of chips) {
-        ctx.font = "bold 11px Arial";
-        const chipW = ctx.measureText(chip.label).width + 24;
-        ctx.fillStyle = "rgba(0,0,0,0.5)";
-        roundRect(ctx, chipX, 66, chipW, 22, 11); ctx.fill();
-        ctx.strokeStyle = `rgba(${hexToRgb(chip.color)},0.4)`; ctx.lineWidth = 1;
-        roundRect(ctx, chipX, 66, chipW, 22, 11); ctx.stroke();
-        ctx.fillStyle = chip.color; ctx.textAlign = "left";
-        ctx.fillText(chip.label, chipX + 12, 81);
+      for (const label of chips) {
+        ctx.font = "bold 11px monospace";
+        const chipW = ctx.measureText(label).width + 20;
+        ctx.strokeStyle = "rgba(0,255,65,0.4)"; ctx.lineWidth = 1;
+        ctx.strokeRect(chipX, 80, chipW, 22);
+        ctx.fillStyle = GREEN; ctx.textAlign = "left";
+        ctx.fillText(label, chipX + 10, 95);
         chipX += chipW + 8;
       }
 
-      const pingLabel = `⚡ ${ping}ms — ${pingStatus}`;
-      ctx.font = "bold 11px Arial";
-      const pingW = ctx.measureText(pingLabel).width + 24;
+      const pingLabel = `[LATENCY::${ping}ms::${pingStatus}]`;
+      ctx.font = "bold 11px monospace";
+      const pingW = ctx.measureText(pingLabel).width + 20;
       glow(ctx, pingColor, 8);
       ctx.strokeStyle = pingColor; ctx.lineWidth = 1.5;
-      roundRect(ctx, W - LP - pingW, 66, pingW, 22, 11); ctx.stroke();
+      ctx.strokeRect(W - LP - pingW, 80, pingW, 22);
       noGlow(ctx);
       ctx.fillStyle = pingColor; ctx.textAlign = "left";
-      ctx.fillText(pingLabel, W - LP - pingW + 12, 81);
+      ctx.fillText(pingLabel, W - LP - pingW + 10, 95);
 
       const bars = [
-        { icon: "💾", label: "RAM USAGE", sub: `Used: ${ramUsed}GB  Free: ${ramFree}GB  Total: ${ramTotal}GB`, pct: ramPct },
-        { icon: "⚙️", label: "CPU LOAD", sub: `Model: ${cpuModel}  Cores: ${cores}  Load: ${load1} / ${load5} / ${load15}`, pct: cpuPct },
-        { icon: "💿", label: "DISK USAGE", sub: `Used: ${disk.used}  Free: ${disk.free}  Total: ${disk.total}`, pct: disk.pct },
+        { label: "RAM_USAGE.SYS", sub: `├─ USED:${ramUsed}GB  ├─ FREE:${ramFree}GB  └─ TOTAL:${ramTotal}GB`, pct: ramPct },
+        { label: "CPU_LOAD.SYS", sub: `├─ ${cpuModel}  ├─ CORES:${cores}  └─ LOAD:${load1}/${load5}/${load15}`, pct: cpuPct },
+        { label: "DISK_USAGE.SYS", sub: `├─ USED:${disk.used}  ├─ FREE:${disk.free}  └─ TOTAL:${disk.total}`, pct: disk.pct },
       ];
 
-      let bY = 104;
+      let bY = 116;
       for (const b of bars) {
-        const [c1, c2, cBg] = barColor(b.pct);
-        drawCard(ctx, RX, bY, RW, 82, 12);
-        drawAccent(ctx, RX, bY, 82, c1);
+        const color = hackColor(b.pct);
+        drawTermBox(ctx, RX, bY, RW, 82, color);
 
-        ctx.fillStyle = "#7df9ff"; ctx.font = "bold 14px Arial"; ctx.textAlign = "left";
-        ctx.fillText(`${b.icon}  ${b.label}`, RX + 14, bY + 22);
+        ctx.fillStyle = GREEN_TEXT; ctx.font = "bold 14px monospace"; ctx.textAlign = "left";
+        ctx.fillText(`> ${b.label}`, RX + 14, bY + 22);
 
         const pctLabel = `${b.pct}%`;
-        ctx.font = "bold 16px Arial";
-        const pctW = ctx.measureText(pctLabel).width + 20;
-        ctx.fillStyle = cBg;
-        roundRect(ctx, RX + RW - pctW - 8, bY + 8, pctW, 24, 8); ctx.fill();
-        glow(ctx, c1, 8); ctx.fillStyle = c1; ctx.textAlign = "right";
-        ctx.fillText(pctLabel, RX + RW - 16, bY + 25);
+        glow(ctx, color, 10);
+        ctx.fillStyle = color; ctx.font = "bold 16px monospace"; ctx.textAlign = "right";
+        ctx.fillText(pctLabel, RX + RW - 14, bY + 22);
         noGlow(ctx);
 
-        drawProgressBar(ctx, RX + 14, bY + 32, RW - 28, 20, b.pct, [c1, c2]);
+        drawSegBar(ctx, RX + 14, bY + 34, RW - 28, 18, b.pct, color);
 
-        ctx.fillStyle = "rgba(180,220,255,0.5)"; ctx.font = "11px Arial"; ctx.textAlign = "left";
-        ctx.fillText(b.sub, RX + 14, bY + 68);
+        ctx.fillStyle = "rgba(0,255,65,0.5)"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+        ctx.fillText(b.sub, RX + 14, bY + 70);
 
         bY += 92;
       }
 
-      // ── Info Grid 3x2 ──
       const gridY = bY + 8;
       const gridInfos = [
-        { icon: "🖥", label: "PLATFORM", value: `${platform} (${arch})` },
-        { icon: "📊", label: "LOAD AVG", value: `${load1} / ${load5} / ${load15}` },
-        { icon: "🧵", label: "CPU THREADS", value: `${cores} logical cores` },
-        { icon: "🌡", label: "CPU MODEL", value: cpuModel },
-        { icon: "🧮", label: "PROCESSES", value: `${processCount}` },
-        { icon: "🎮", label: "GPU", value: gpuInfo },
+        { label: "PLATFORM", value: `${platform}(${arch})` },
+        { label: "LOAD_AVG", value: `${load1}/${load5}/${load15}` },
+        { label: "THREADS", value: `${cores}` },
+        { label: "CPU_MODEL", value: cpuModel },
+        { label: "PROCESSES", value: `${processCount}` },
+        { label: "GPU", value: gpuInfo },
       ];
-
       const gCols = 3;
       const gW = Math.floor(RW / gCols) - 6;
       gridInfos.forEach((inf, i) => {
-        const col = i % gCols;
-        const row = Math.floor(i / gCols);
-        const gx = RX + col * (gW + 9);
-        const gy = gridY + row * 60;
-
-        drawCard(ctx, gx, gy, gW, 52, 10);
-        drawAccent(ctx, gx, gy, 52, "#00aaff");
-
-        ctx.fillStyle = "#7df9ff"; ctx.font = "bold 11px Arial"; ctx.textAlign = "left";
-        ctx.fillText(`${inf.icon}  ${inf.label}`, gx + 14, gy + 19);
-        ctx.fillStyle = "#e8f8ff"; ctx.font = "bold 13px Arial"; ctx.textAlign = "right";
-        ctx.fillText(inf.value, gx + gW - 10, gy + 40);
+        const col = i % gCols, row = Math.floor(i / gCols);
+        const gx = RX + col * (gW + 9), gy = gridY + row * 58;
+        drawTermBox(ctx, gx, gy, gW, 50, GREEN_DIM === GREEN ? GREEN : "#00aa2f");
+        ctx.fillStyle = "rgba(0,255,65,0.65)"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+        ctx.fillText(`> ${inf.label}`, gx + 12, gy + 18);
+        ctx.fillStyle = GREEN_TEXT; ctx.font = "bold 12px monospace"; ctx.textAlign = "right";
+        ctx.fillText(String(inf.value).substring(0, 22), gx + gW - 10, gy + 38);
       });
 
-      // ── Per-core CPU bars ──
-      const coreY = gridY + 120 + 18;
-      ctx.fillStyle = "#7df9ff"; ctx.font = "bold 11px Arial"; ctx.textAlign = "left";
-      ctx.fillText("⚙️  PER-CORE LOAD", RX, coreY);
-      drawCoreBars(ctx, RX, coreY + 10, RW, 36, perCore);
+      const coreY = gridY + 116 + 18;
+      ctx.fillStyle = "rgba(0,255,65,0.7)"; ctx.font = "bold 11px monospace"; ctx.textAlign = "left";
+      ctx.fillText("> PER_CORE_LOAD.MAP", RX, coreY);
+      drawCoreBars(ctx, RX, coreY + 10, RW, 34, perCore);
 
-      // ── Trend sparkline + network speed ──
-      const sparkY = coreY + 70;
-      ctx.fillStyle = "#7df9ff"; ctx.font = "bold 11px Arial"; ctx.textAlign = "left";
-      ctx.fillText("📉  CPU / RAM TREND (recent runs)", RX, sparkY);
-      ctx.fillStyle = "rgba(0,170,255,0.8)"; ctx.font = "10px Arial"; ctx.textAlign = "right";
-      ctx.fillText("● RAM", RX + RW - 60, sparkY);
-      ctx.fillStyle = "rgba(255,157,0,0.8)";
-      ctx.fillText("● CPU", RX + RW - 10, sparkY);
-      drawSparkline(ctx, RX, sparkY + 8, RW, 40, stats.history);
+      const sparkY = coreY + 68;
+      ctx.fillStyle = "rgba(0,255,65,0.7)"; ctx.font = "bold 11px monospace"; ctx.textAlign = "left";
+      ctx.fillText("> TREND_ANALYSIS.LOG (recent runs)", RX, sparkY);
+      ctx.fillStyle = GREEN; ctx.font = "10px monospace"; ctx.textAlign = "right";
+      ctx.fillText("■ RAM", RX + RW - 55, sparkY);
+      ctx.fillStyle = RED;
+      ctx.fillText("■ CPU", RX + RW - 10, sparkY);
+      drawSparkline(ctx, RX, sparkY + 8, RW, 38, stats.history);
 
-      // ── Bottom Status Bar ──
       const sbY = H - LP - 38;
       const sysOk = cpuPct < 80 && ramPct < 85 && ping < 400;
-      const sbColor = sysOk ? "#00ff9d" : "#ffdd00";
-      const sbLabel = sysOk ? "● ALL SYSTEMS OPERATIONAL" : "⚠ HIGH RESOURCE USAGE";
+      const sbColor = sysOk ? GREEN : RED;
+      const sbLabel = sysOk ? "[STATUS::ALL_SYSTEMS_NOMINAL]" : "[ALERT::HIGH_RESOURCE_USAGE]";
 
-      ctx.fillStyle = "rgba(0,229,255,0.05)";
-      roundRect(ctx, RX, sbY, RW, 30, 8); ctx.fill();
-      ctx.strokeStyle = "rgba(0,229,255,0.18)"; ctx.lineWidth = 1;
-      roundRect(ctx, RX, sbY, RW, 30, 8); ctx.stroke();
-
-      ctx.fillStyle = "rgba(0,229,255,0.5)"; ctx.font = "11px Arial"; ctx.textAlign = "left";
-      ctx.fillText(`v6.0 • by HR ID OY • NODE ${nodeVer} • NET ${netSpeed}`, RX + 12, sbY + 20);
-
-      glow(ctx, sbColor, 8);
-      ctx.fillStyle = sbColor; ctx.font = "bold 12px Arial"; ctx.textAlign = "right";
-      ctx.fillText(sbLabel, RX + RW - 12, sbY + 20);
+      ctx.strokeStyle = "rgba(0,255,65,0.25)"; ctx.lineWidth = 1;
+      ctx.strokeRect(RX, sbY, RW, 30);
+      ctx.fillStyle = "rgba(0,255,65,0.6)"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+      ctx.fillText(`v7.0-HACKER • HR_ID_OY • NODE_${nodeVer} • NET_${netSpeed}`, RX + 12, sbY + 19);
+      glow(ctx, sbColor, sysOk ? 8 : 14);
+      ctx.fillStyle = sbColor; ctx.font = "bold 11px monospace"; ctx.textAlign = "right";
+      ctx.fillText(sbLabel, RX + RW - 12, sbY + 19);
       noGlow(ctx);
 
-      ctx.font = "10px monospace"; ctx.fillStyle = "rgba(0,180,255,0.12)"; ctx.textAlign = "left";
-      for (let i = 0; i < 12; i++) {
-        const hx = Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6, "0");
-        ctx.fillText(`0x${hx}`, LP + 20 + i * 86, H - 6);
+      // Binary/hex data stream footer
+      ctx.font = "9px monospace"; ctx.fillStyle = "rgba(0,255,65,0.14)"; ctx.textAlign = "left";
+      for (let i = 0; i < 14; i++) {
+        const bin = Array.from({ length: 8 }, () => Math.round(Math.random())).join("");
+        ctx.fillText(bin, LP + 20 + i * 74, H - 6);
       }
 
-      // ── Save & Send ──
+      // CRT overlay
+      drawScanlines(ctx, W, H);
+      drawVignette(ctx, W, H);
+
       fs.mkdirSync(CACHE_PATH, { recursive: true });
       const outPath = path.join(CACHE_PATH, `upt_${userID}_${Date.now()}.png`);
       await fs.writeFile(outPath, cv.toBuffer("image/png"));
