@@ -289,7 +289,6 @@ function drawSparkline(ctx, x, y, w, h, history) {
 module.exports = {
   config: {
     name: "uptime",
-    aliases: ["up", "status", "upt", "sys", "hack"],
     version: "7.0-HACKER",
     author: "HR ID OY",
     countDown: 5,
